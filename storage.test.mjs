@@ -162,3 +162,35 @@ test('deletion removes only the selected clip and all its chunks', async t => {
   assert.deepEqual(await counts(vault), { clips: 1, chunks: 1 });
   assert.deepEqual(await vault.unlock(password), [keep]);
 });
+
+test('a fresh encrypted selection survives locking without deleting previous imports', async t => {
+  const vault = await fresh(t);
+  const old = await vault.importFile(video(), info);
+  assert.deepEqual(await vault.selection([old.id]), [old.id]);
+  await vault.select([]);
+  const record = await read(vault.db, 'meta', 'edit-selection');
+  assert(record.data instanceof ArrayBuffer);
+  assert.equal(record.ids, undefined);
+  vault.lock();
+  assert.deepEqual(await vault.unlock(password), [old]);
+  assert.deepEqual(await vault.selection([old.id]), []);
+  const next = await vault.importFile(video(25, 'new.mp4'), info, { selectedIds: [] });
+  assert.deepEqual(await vault.selection([]), [next.id]);
+  await vault.select([old.id, next.id]);
+  assert.deepEqual(await vault.selection([]), [old.id, next.id]);
+  assert.deepEqual(await counts(vault), { clips: 2, chunks: 2 });
+});
+
+test('selection and import metadata commit atomically on a storage failure', async t => {
+  const vault = await fresh(t);
+  const old = await vault.importFile(video(), info, { selectedIds: [] });
+  const original = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (...args) {
+    if (this.name === 'meta' && args[1] === 'edit-selection') throw new DOMException('Synthetic full disk', 'QuotaExceededError');
+    return original.apply(this, args);
+  };
+  try { await assert.rejects(vault.importFile(video(), info, { selectedIds: [old.id] }), { name: 'QuotaExceededError' }); }
+  finally { IDBObjectStore.prototype.put = original; }
+  assert.deepEqual(await vault.selection([]), [old.id]);
+  assert.deepEqual(await counts(vault), { clips: 1, chunks: 1 });
+});
