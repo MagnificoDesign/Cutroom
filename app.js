@@ -1,17 +1,210 @@
-import{descriptor,detectOverlap,bestOrder,makePlan}from"./core.mjs";
-const $=s=>document.querySelector(s),S={clips:[],a:new Map,o:[],plan:null,busy:false,msg:"",screen:"studio"};let db,key=null,picker=false;const DB="cutroom-independent-v1",CH=4194304,E=new TextEncoder,D=new TextDecoder,b64=u=>btoa(String.fromCharCode(...u)),unb=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0)),req=r=>new Promise((a,b)=>{r.onsuccess=()=>a(r.result);r.onerror=()=>b(r.error)}),tx=(s,m="readonly")=>db.transaction(s,m),done=t=>new Promise((a,b)=>{t.oncomplete=a;t.onerror=()=>b(t.error)});
-async function open(){db=await new Promise((a,b)=>{let r=indexedDB.open(DB,1);r.onupgradeneeded=()=>["meta","clips","chunks"].forEach(n=>{if(!r.result.objectStoreNames.contains(n))r.result.createObjectStore(n)});r.onsuccess=()=>a(r.result);r.onerror=()=>b(r.error)})}
-async function derive(p,s){let b=await crypto.subtle.importKey("raw",E.encode(p),"PBKDF2",false,["deriveKey"]);return crypto.subtle.deriveKey({name:"PBKDF2",salt:s,iterations:350000,hash:"SHA-256"},b,{name:"AES-GCM",length:256},false,["encrypt","decrypt"])}
-async function seal(u,a){let iv=crypto.getRandomValues(new Uint8Array(12)),d=await crypto.subtle.encrypt({name:"AES-GCM",iv,additionalData:E.encode(a)},key,u);return{iv:b64(iv),data:b64(new Uint8Array(d))}}
-async function unseal(x,a){return new Uint8Array(await crypto.subtle.decrypt({name:"AES-GCM",iv:unb(x.iv),additionalData:E.encode(a)},key,unb(x.data)))}
-async function restore(){S.clips=[];for(const id of await req(tx(["clips"]).objectStore("clips").getAllKeys())){let x=await req(tx(["clips"]).objectStore("clips").get(id)),m=JSON.parse(D.decode(await unseal(x,`meta/${id}`)));S.clips.push({...m,id,url:null})}}
-async function login(p){let h=await req(tx(["meta"]).objectStore("meta").get("header"));if(!h){if(p.length<12)throw Error("Use at least 12 characters.");let salt=crypto.getRandomValues(new Uint8Array(16));key=await derive(p,salt);let sent=await seal(E.encode("ok"),"sentinel"),t=tx(["meta"],"readwrite");t.objectStore("meta").put({salt:b64(salt),sent},"header");await done(t)}else{try{key=await derive(p,unb(h.salt));await unseal(h.sent,"sentinel")}catch{key=null;throw Error("That password doesn't unlock this vault.")}}await restore();render()}
-async function purge(id){let t=tx(["clips","chunks"],"readwrite");t.objectStore("clips").delete(id);for(const k of await req(t.objectStore("chunks").getAllKeys()))if(String(k).startsWith(id+":"))t.objectStore("chunks").delete(k);await done(t)}
-async function probe(f){let v=document.createElement("video"),u=URL.createObjectURL(f);v.preload="metadata";v.src=u;await new Promise((a,b)=>{v.onloadedmetadata=a;v.onerror=()=>b(Error("iPhone could not read this clip."))});let z={duration:v.duration,width:v.videoWidth,height:v.videoHeight};URL.revokeObjectURL(u);return z}
-async function add(fs){S.busy=true;let ok=0;try{for(let n=0;n<fs.length;n++){let f=fs[n],id=crypto.randomUUID();S.msg=`Encrypting video ${n+1} of ${fs.length}…`;render();try{let info=await probe(f),count=Math.ceil(f.size/CH);for(let i=0;i<count;i++){let c=await seal(new Uint8Array(await f.slice(i*CH,Math.min(f.size,(i+1)*CH)).arrayBuffer()),`chunk/${id}/${i}`),t=tx(["chunks"],"readwrite");t.objectStore("chunks").put(c,`${id}:${i}`);await done(t)}let m={name:f.name,size:f.size,type:f.type||"video/mp4",count,...info},c=await seal(E.encode(JSON.stringify(m)),`meta/${id}`),t=tx(["clips"],"readwrite");t.objectStore("clips").put(c,id);await done(t);S.clips.push({...m,id,url:URL.createObjectURL(f)});ok++}catch(e){await purge(id).catch(()=>{});throw e}}S.msg=`${ok} video${ok===1?"":"s"} ready.`}catch(e){S.msg=`Imported ${ok} of ${fs.length}. ${e.message}`}finally{S.busy=false;render()}}
-async function blob(c){let p=[];for(let i=0;i<c.count;i++){let x=await req(tx(["chunks"]).objectStore("chunks").get(`${c.id}:${i}`));p.push((await unseal(x,`chunk/${c.id}/${i}`)).buffer)}return new Blob(p,{type:c.type})}
-async function sample(c){let b=c.url?await fetch(c.url).then(r=>r.blob()):await blob(c),v=document.createElement("video"),u=URL.createObjectURL(b);v.muted=true;v.src=u;await new Promise((a,z)=>{v.onloadedmetadata=a;v.onerror=z});let cv=document.createElement("canvas");cv.width=96;cv.height=54;let x=cv.getContext("2d",{willReadFrequently:true}),n=Math.max(8,Math.min(100,Math.ceil(c.duration*4))),out=[];for(let i=0;i<n;i++){let t=Math.min(c.duration-.03,i*(c.duration-.03)/Math.max(1,n-1));v.currentTime=t;await new Promise(a=>v.onseeked=a);x.drawImage(v,0,0,96,54);out.push(descriptor(x.getImageData(0,0,96,54).data,96,54,t))}URL.revokeObjectURL(u);return out}
-async function create(){S.busy=true;S.screen="creating";render();try{for(let i=0;i<S.clips.length;i++){S.msg=`Analyzing video ${i+1} of ${S.clips.length}…`;render();S.a.set(S.clips[i].id,await sample(S.clips[i]))}S.o=[];for(let i=0;i<S.clips.length;i++)for(let j=0;j<S.clips.length;j++)if(i!==j){let a=S.clips[i],b=S.clips[j],m=detectOverlap(S.a.get(a.id),S.a.get(b.id));if(m)S.o.push({a:a.id,b:b.id,match:m})}let e=S.clips.map(c=>({...c,samples:S.a.get(c.id)}));S.plan=makePlan(e,bestOrder(e),S.o);S.screen="result"}catch(e){S.screen="studio";S.msg=e.message||"Create failed."}finally{S.busy=false;render()}}
-function lock(){key=null;S.clips.forEach(c=>c.url&&URL.revokeObjectURL(c.url));S.clips=[];S.plan=null;S.screen="studio";render()}const esc=(s="")=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])),head=()=>`<div class=top><div class=mark>C</div><div><h1>Cutroom</h1><span>Private editor · v0.3</span></div>${key?"<button id=lock class=ghost>Lock</button>":""}</div>`;
-function render(){let a=$("#app");if(!key){a.innerHTML=head()+`<section class="panel login"><div class=eyebrow>PRIVATE VIDEO EDITOR</div><h2>Make your clips flow.</h2><p>Unlock once. Add videos. Create.</p><input id=p type=password placeholder=Password><button id=u class=primary>Unlock Cutroom</button><div id=err class=error></div></section>`;$("#u").onclick=async()=>{try{await login($("#p").value)}catch(e){$("#err").textContent=e.message}};return}if(S.screen==="creating"){a.innerHTML=head()+`<section class="panel"><div class=spinner></div><div class=eyebrow>CREATING</div><h2>Making it great…</h2><p>${esc(S.msg)}</p></section>`;$("#lock").onclick=lock;return}if(S.screen==="result"){a.innerHTML=head()+`<section class=panel><div class=eyebrow>EDIT READY</div><h2>Your edit is planned.</h2><div class=preview><div class=play>▶</div><span>Renderer verification is next.</span></div><button class="primary disabled" disabled>Save to Photos</button><button id=again class=secondary>Make Another</button></section>`;$("#again").onclick=()=>{S.screen="studio";render()};$("#lock").onclick=lock;return}let cs=S.clips.map((c,i)=>`<div class=clip><div class=num>${i+1}</div><div><b>${esc(c.name)}</b><small>${c.duration.toFixed(1)} sec · ${(c.size/1048576).toFixed(1)} MB</small></div></div>`).join("");a.innerHTML=head()+`<section class=panel><div class=eyebrow>NEW EDIT</div><h2>${S.clips.length?"Ready to create.":"Add your videos."}</h2><p>The Photos picker stays inside your unlocked import flow.</p><button id=add class=upload>＋ Add Videos</button><input id=file type=file accept="video/*" multiple hidden><div class=clips>${cs}</div>${S.msg?`<div class=status>${esc(S.msg)}</div>`:""}<button id=create class="primary ${!S.clips.length||S.busy?"disabled":""}" ${!S.clips.length||S.busy?"disabled":""}>Create</button></section>`;$("#add").onclick=()=>{picker=true;$("#file").click()};$("#file").onchange=async e=>{let fs=[...e.target.files];picker=false;e.target.value="";if(fs.length)await add(fs)};$("#create").onclick=create;$("#lock").onclick=lock}
-document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden"&&key&&!picker)lock()});(async()=>{await open();navigator.serviceWorker?.register("./sw.js").catch(()=>{});render()})().catch(e=>{$("#app").innerHTML=`<div class=error>${esc(e.message)}</div>`});
+import { detectOverlap, bestOrder, makePlan } from './core.mjs';
+import { openVault, check } from './vault.mjs';
+import { probe, sample } from './media.mjs';
+
+const $ = selector => document.querySelector(selector);
+const state = { clips: [], analyses: new Map(), overlaps: [], plan: null, busy: false, message: '', failures: [], screen: 'studio' };
+let vault, session = new AbortController(), unlocking = false, picker = null;
+const fileInput = document.createElement('input');
+fileInput.type = 'file';
+fileInput.accept = 'video/*';
+fileInput.multiple = true;
+fileInput.hidden = true;
+fileInput.id = 'file';
+document.body.append(fileInput);
+
+const esc = (text = '') => String(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+const active = signal => signal === session.signal && !signal.aborted;
+function clearPlan() { state.analyses.clear(); state.overlaps = []; state.plan = null; state.screen = 'studio'; }
+function explain(error) {
+  if (error?.name === 'QuotaExceededError') return 'There is not enough local storage. Free some space, then retry this video.';
+  if (error?.name === 'OperationError') return 'This video could not be encrypted. Retry it while Cutroom stays open.';
+  if (error?.name === 'NotReadableError') return 'The original video could not be read. Make sure it has finished downloading in Photos or Files.';
+  return error?.message || 'This video could not be added. Please try again.';
+}
+
+async function login(password) {
+  if (unlocking) return;
+  const signal = session.signal;
+  unlocking = true;
+  $('#u').disabled = true;
+  $('#p').value = '';
+  try {
+    const clips = await vault.unlock(password, signal);
+    check(signal);
+    state.clips = clips;
+    render();
+  } catch (error) {
+    if (active(signal)) $('#err').textContent = explain(error);
+  } finally {
+    if (active(signal)) {
+      unlocking = false;
+      if ($('#u')) $('#u').disabled = false;
+    }
+  }
+}
+
+async function add(files) {
+  if (!vault.key || state.busy) return;
+  const signal = session.signal;
+  state.busy = true;
+  state.failures = [];
+  clearPlan();
+  let imported = 0;
+  try {
+    for (let index = 0; index < files.length; index++) {
+      check(signal);
+      const file = files[index];
+      try {
+        state.message = `Opening video ${index + 1} of ${files.length}…`;
+        render();
+        const info = await probe(file, signal);
+        check(signal);
+        state.message = `Encrypting video ${index + 1} of ${files.length} · 0%`;
+        render();
+        const clip = await vault.importFile(file, info, {
+          signal,
+          onProgress: (saved, total) => {
+            check(signal);
+            state.message = `Encrypting video ${index + 1} of ${files.length} · ${Math.round(saved / total * 100)}%`;
+            render();
+          }
+        });
+        check(signal);
+        state.clips.push(clip);
+        imported++;
+      } catch (error) {
+        check(signal);
+        state.failures.push({ file, reason: explain(error) });
+      }
+    }
+    state.message = state.failures.length
+      ? `Added ${imported} of ${files.length} videos. Your successful imports are saved.`
+      : `${imported} video${imported === 1 ? '' : 's'} ready.`;
+  } finally {
+    files.length = 0;
+    if (active(signal)) { state.busy = false; render(); }
+  }
+}
+
+function openPicker() {
+  if (!vault.key || state.busy || picker) return;
+  picker = { signal: session.signal, files: null };
+  fileInput.value = '';
+  try { fileInput.click(); }
+  catch { picker = null; state.message = 'The video picker could not open. Please try again.'; render(); }
+}
+
+function finishPicker() {
+  const pending = picker;
+  if (!pending || pending.files === null || document.visibilityState !== 'visible') return;
+  picker = null;
+  if (!active(pending.signal) || !vault.key || !pending.files.length) return;
+  void add(pending.files).catch(error => {
+    if (active(pending.signal)) { state.message = explain(error); render(); }
+  });
+}
+
+fileInput.addEventListener('change', () => {
+  if (!picker) { fileInput.value = ''; return; }
+  picker.files = Array.from(fileInput.files);
+  fileInput.value = '';
+  // iOS may deliver change before the page becomes visible again.
+  finishPicker();
+});
+fileInput.addEventListener('cancel', () => { picker = null; fileInput.value = ''; });
+// Clear a cancelled picker on the next app interaction on older browser builds.
+document.addEventListener('pointerdown', () => {
+  if (picker && document.visibilityState === 'visible' && picker.files === null) picker = null;
+}, true);
+
+async function create() {
+  if (state.busy || !vault.key || !state.clips.length) return;
+  const signal = session.signal;
+  clearPlan();
+  state.busy = true;
+  state.screen = 'creating';
+  try {
+    for (let index = 0; index < state.clips.length; index++) {
+      check(signal);
+      state.message = `Analyzing video ${index + 1} of ${state.clips.length}…`;
+      render();
+      const clip = state.clips[index];
+      const frames = await sample(await vault.blob(clip, signal), signal);
+      check(signal);
+      state.analyses.set(clip.id, frames);
+    }
+    for (const a of state.clips) for (const b of state.clips) {
+      check(signal);
+      if (a.id === b.id) continue;
+      const match = detectOverlap(state.analyses.get(a.id), state.analyses.get(b.id));
+      if (match) state.overlaps.push({ a: a.id, b: b.id, match });
+    }
+    const entries = state.clips.map(clip => ({ ...clip, samples: state.analyses.get(clip.id) }));
+    state.plan = makePlan(entries, bestOrder(entries), state.overlaps);
+    check(signal);
+    state.screen = 'result';
+  } catch (error) {
+    if (active(signal)) { clearPlan(); state.message = explain(error); }
+  } finally {
+    if (active(signal)) { state.busy = false; render(); }
+  }
+}
+
+function lock() {
+  session.abort(new DOMException('Cutroom was locked.', 'AbortError'));
+  session = new AbortController();
+  vault?.lock();
+  if (picker?.files) picker.files.length = 0;
+  picker = null;
+  fileInput.value = '';
+  unlocking = false;
+  state.clips = [];
+  state.failures = [];
+  state.message = '';
+  state.busy = false;
+  clearPlan();
+  render();
+}
+
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.4</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+function render() {
+  const app = $('#app');
+  if (!vault?.key) {
+    app.innerHTML = head() + `<section class="panel login"><div class="eyebrow">PRIVATE VIDEO EDITOR</div><h2>Make your clips flow.</h2><p>Unlock once. Add videos. Create.</p><form id="login"><label class="sr-only" for="p">Password</label><input id="p" type="password" autocomplete="current-password" placeholder="Password" required><button id="u" class="primary" type="submit">Unlock Cutroom</button></form><div id="err" class="error" role="alert"></div></section>`;
+    $('#login').onsubmit = event => { event.preventDefault(); void login($('#p').value); };
+    return;
+  }
+  if (state.screen === 'creating') {
+    app.innerHTML = head() + `<section class="panel"><div class="spinner"></div><div class="eyebrow">CREATING</div><h2>Finding the flow…</h2><p role="status">${esc(state.message)}</p></section>`;
+  } else if (state.screen === 'result') {
+    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">ANALYSIS COMPLETE</div><h2>Your clips are analyzed.</h2><p>This build checks the edit sequence. Finished video playback and saving are still being built.</p><p>All original footage is kept.</p><button class="primary" disabled>Save to Photos · coming next</button><button id="again" class="secondary">Back to Videos</button></section>`;
+    $('#again').onclick = () => { state.screen = 'studio'; render(); };
+  } else {
+    const clips = state.clips.map((clip, index) => `<div class="clip"><div class="num">${index + 1}</div><div><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></div></div>`).join('');
+    const failures = state.failures.length ? `<div class="error" role="alert">${state.failures.map(item => `<p><b>${esc(item.file.name)}</b>: ${esc(item.reason)}</p>`).join('')}</div><button id="retry" class="secondary" ${state.busy ? 'disabled' : ''}>Retry Failed Videos</button>` : '';
+    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Your imported copies are encrypted on this device.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>＋ Add Videos</button><div class="clips">${clips}</div>${state.message ? `<div class="status" role="status">${esc(state.message)}</div>` : ''}${failures}<button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button></section>`;
+    $('#add').onclick = openPicker;
+    $('#create').onclick = create;
+    if ($('#retry')) $('#retry').onclick = () => {
+      const signal = session.signal;
+      const files = state.failures.map(item => item.file);
+      void add(files).catch(error => { if (active(signal)) { state.message = explain(error); render(); } });
+    };
+  }
+  $('#lock').onclick = lock;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && (vault?.key || unlocking) && !picker) lock();
+  else if (document.visibilityState === 'visible') finishPicker();
+});
+window.addEventListener('pagehide', lock);
+
+(async () => {
+  vault = await openVault();
+  navigator.serviceWorker?.register('./sw.js').catch(() => {});
+  render();
+})().catch(() => {
+  $('#app').innerHTML = '<div class="error" role="alert">Cutroom could not open local storage. Reopen it in Safari and try again.</div>';
+});
