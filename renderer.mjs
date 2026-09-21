@@ -2,21 +2,11 @@ import {
   Input, ALL_FORMATS, BlobSource, Output, BufferTarget, Mp4OutputFormat, WebMOutputFormat,
   CanvasSink, CanvasSource, VideoSampleSink, AudioBufferSink, AudioBufferSource,
   canEncodeVideo, canEncodeAudio
-} from './mediabunny.mjs';
-import { check } from './vault.mjs';
-import { validatePlan } from './planner.mjs';
-import { FRAME_RATE, SAMPLE_RATE, outputSize, renderTimeline, placeAudio, finishAudio } from './render-core.mjs';
-
-function guarded(promise, signal, message = 'This video took too long to process. Try a shorter clip.') {
-  check(signal);
-  return new Promise((resolve, reject) => {
-    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
-    const abort = () => { cleanup(); reject(signal.reason); };
-    const timer = setTimeout(() => { cleanup(); reject(new Error(message)); }, 45000);
-    signal?.addEventListener('abort', abort, { once: true });
-    Promise.resolve(promise).then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
-  });
-}
+} from './mediabunny.mjs?v=6';
+import { check } from './vault.mjs?v=6';
+import { validatePlan } from './planner.mjs?v=6';
+import { FRAME_RATE, SAMPLE_RATE, outputSize, renderTimeline, placeAudio, finishAudio } from './render-core.mjs?v=6';
+import { guarded } from './media.mjs?v=6';
 
 export async function selectFormat(size) {
   if (typeof VideoEncoder === 'undefined' || typeof AudioEncoder === 'undefined') {

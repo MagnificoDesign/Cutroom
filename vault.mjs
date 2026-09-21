@@ -158,7 +158,26 @@ export class Vault {
       tx.objectStore('chunks').delete(IDBKeyRange.bound(`${id}:`, `${id}:\uffff`));
     });
   }
-  async importFile(file, info, { signal, onProgress = () => {} } = {}) {
+  async selection(fallback, signal) {
+    this.assertUnlocked(signal);
+    const record = await read(this.db, 'meta', 'edit-selection', signal);
+    this.assertUnlocked(signal);
+    if (!record) return [...fallback]; // Preserve the existing edit when upgrading.
+    const ids = JSON.parse(decoder.decode(await unseal(this.key, record, 'edit-selection')));
+    this.assertUnlocked(signal);
+    if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string')) throw new Error('Your saved selection could not be read.');
+    return [...new Set(ids)];
+  }
+  async select(ids, signal) {
+    this.assertUnlocked(signal);
+    return this.exclusive(signal, async () => {
+      this.assertUnlocked(signal);
+      const encrypted = await seal(this.key, encoder.encode(JSON.stringify([...new Set(ids)])), 'edit-selection');
+      this.assertUnlocked(signal);
+      await put(this.db, 'meta', 'edit-selection', encrypted, signal);
+    });
+  }
+  async importFile(file, info, { signal, selectedIds, onProgress = () => {} } = {}) {
     this.assertUnlocked(signal);
     return this.exclusive(signal, async () => {
       const id = crypto.randomUUID();
@@ -178,7 +197,13 @@ export class Vault {
         const meta = { name: file.name, size: file.size, type: file.type || 'video/mp4', count, ...info, importedAt: Date.now() };
         const encrypted = await seal(this.key, encoder.encode(JSON.stringify(meta)), `meta/${id}`);
         this.assertUnlocked(signal);
-        await put(this.db, 'clips', id, encrypted, signal);
+        const selection = selectedIds && await seal(this.key, encoder.encode(JSON.stringify([...new Set([...selectedIds, id])])), 'edit-selection');
+        this.assertUnlocked(signal);
+        // The clip and its membership in the current edit commit together.
+        await transaction(this.db, ['clips', 'meta'], 'readwrite', tx => {
+          tx.objectStore('clips').put(encrypted, id);
+          if (selection) tx.objectStore('meta').put(selection, 'edit-selection');
+        }, signal);
         this.assertUnlocked(signal);
         return { ...meta, id };
       } catch (error) {

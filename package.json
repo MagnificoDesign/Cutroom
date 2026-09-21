@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test core.test.mjs vault.test.mjs storage.test.mjs planner.test.mjs render-core.test.mjs",
+    "test": "node --test core.test.mjs vault.test.mjs storage.test.mjs planner.test.mjs render-core.test.mjs overlap.test.mjs",
     "test:browser": "node browser.test.mjs"
   },
   "devDependencies": {

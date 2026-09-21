@@ -1,4 +1,4 @@
-import { clamp, frameSimilarity, motion } from './core.mjs';
+import { clamp, frameSimilarity, motion } from './core.mjs?v=6';
 
 const minimumKeep = clip => Math.min(clip.duration, Math.max(.5, clip.duration * .45));
 const closest = (frames, time) => frames.reduce((best, frame) => Math.abs(frame.t - time) < Math.abs(best.t - time) ? frame : best, frames[0]);
@@ -80,8 +80,8 @@ function times(clip, side) {
     if (side === 'out' && frame.t >= keep && frame.t < clip.duration - .04) all.push(frame.t);
   }
   all.sort((a, b) => a - b);
-  if (all.length <= 10) return all;
-  return Array.from(new Set(Array.from({ length: 10 }, (_, i) => all[Math.round(i * (all.length - 1) / 9)])));
+  const coarse = all.length <= 10 ? all : Array.from(new Set(Array.from({ length: 10 }, (_, i) => all[Math.round(i * (all.length - 1) / 9)])));
+  return [...new Set([...coarse, ...(side === 'in' ? clip.fineIn || [] : clip.fineOut || [])])].sort((a, b) => a - b);
 }
 
 export function validatePlan(clips, plan) {
@@ -96,11 +96,13 @@ export function validatePlan(clips, plan) {
   return plan;
 }
 
-export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImprovement = .06 } = {}) {
+export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImprovement = .06, verified = [], reviewed = [] } = {}) {
   if (!clips.length || clips.some(clip => !(clip.duration > 0) || !Number.isFinite(clip.duration))) throw new Error('Add readable videos before creating an edit.');
   if (clips.length > 12) throw new Error('For this version, choose up to 12 videos for one edit.');
   const full = clips.map(clip => ({ id: clip.id, start: 0, end: clip.duration }));
-  if (clips.length === 1) return { segments: full, baselineCost: 0, cost: 0, improved: false };
+  if (clips.length === 1) return { segments: full, baselineCost: 0, cost: 0, improved: false, joins: [], reviewed };
+  const protectedIds = new Set([...verified, ...reviewed].flatMap(pair => [pair.a, pair.b]));
+  const overlaps = new Map(verified.filter(pair => pair.status === 'verified').map(pair => [`${pair.a}/${pair.b}`, pair]));
   const cache = new Map();
   const sig = (index, time, side) => {
     const key = `${index}/${time}/${side}`;
@@ -112,7 +114,7 @@ export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImp
     if (a === b) continue;
     const natural = boundaryCost(sig(a, clips[a].duration, 'out'), sig(b, 0, 'in'));
     const options = [];
-    for (const end of times(clips[a], 'out')) for (const start of times(clips[b], 'in')) {
+    for (const end of protectedIds.has(clips[a].id) ? [clips[a].duration] : times(clips[a], 'out')) for (const start of protectedIds.has(clips[b].id) ? [0] : times(clips[b], 'in')) {
       const score = boundaryCost(sig(a, end, 'out'), sig(b, start, 'in'));
       const trimmed = end < clips[a].duration - .001 || start > .001;
       // Weak, blank or opposite-motion matches cannot justify throwing away time.
@@ -123,27 +125,35 @@ export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImp
     options.sort((x, y) => x.cost - y.cost);
     const candidates = options.slice(0, 18);
     if (!candidates.some(v => v.end === clips[a].duration && v.start === 0)) candidates.push({ end: clips[a].duration, start: 0, cost: natural.cost });
+    const overlap = overlaps.get(`${clips[a].id}/${clips[b].id}`);
+    if (overlap) for (const seam of overlap.seams) {
+      if (seam.start < 0 || seam.end > clips[a].duration || seam.start >= clips[b].duration || Math.abs(seam.end - seam.start - overlap.offset) > .0001) continue;
+      // Strong temporal + sound evidence authorizes using shared time once.
+      // A reward per verified join favors a complete chain over skipping its middle.
+      candidates.push({ ...seam, overlap: true, cost: seam.cost - 2 });
+    }
     joins.set(`${a}/${b}`, candidates);
   }
   let baselineCost = 0;
   for (let i = 0; i + 1 < clips.length; i++) baselineCost += boundaryCost(sig(i, clips[i].duration, 'out'), sig(i + 1, 0, 'in')).cost;
-  let beam = clips.map((clip, index) => ({ mask: 1 << index, last: index, start: 0, cost: 0, done: [] }));
+  let beam = clips.map((clip, index) => ({ mask: 1 << index, last: index, start: 0, cost: 0, done: [], joins: [], incomingOverlap: false }));
   for (let depth = 1; depth < clips.length; depth++) {
     const next = new Map();
     for (const state of beam) for (let b = 0; b < clips.length; b++) {
       if (state.mask & (1 << b)) continue;
       for (const join of joins.get(`${state.last}/${b}`)) {
-        if (join.end - state.start < minimumKeep(clips[state.last]) - .0001) continue;
-        const candidate = { mask: state.mask | (1 << b), last: b, start: join.start, cost: state.cost + join.cost, done: [...state.done, { id: clips[state.last].id, start: state.start, end: join.end }] };
-        const key = `${candidate.mask}/${b}/${join.start}`;
+        const keep = join.overlap || state.incomingOverlap ? Math.min(.12, clips[state.last].duration) : minimumKeep(clips[state.last]);
+        if (join.end - state.start < keep - .0001) continue;
+        const candidate = { mask: state.mask | (1 << b), last: b, start: join.start, cost: state.cost + join.cost, done: [...state.done, { id: clips[state.last].id, start: state.start, end: join.end }], incomingOverlap: !!join.overlap, joins: [...state.joins, { a: clips[state.last].id, b: clips[b].id, kind: join.overlap ? 'overlap' : 'cut', end: join.end, start: join.start }] };
+        const key = `${candidate.mask}/${b}/${join.start}/${candidate.incomingOverlap}`;
         if (!next.has(key) || candidate.cost < next.get(key).cost) next.set(key, candidate);
       }
     }
     beam = [...next.values()].sort((a, b) => a.cost - b.cost).slice(0, beamWidth);
   }
   const best = beam.sort((a, b) => a.cost - b.cost)[0];
-  if (!best || best.cost >= baselineCost - minimumImprovement) return { segments: full, baselineCost, cost: baselineCost, improved: false };
+  if (!best || best.cost >= baselineCost - minimumImprovement) return { segments: full, baselineCost, cost: baselineCost, improved: false, joins: [], reviewed };
   const segments = [...best.done, { id: clips[best.last].id, start: best.start, end: clips[best.last].duration }];
   validatePlan(clips, segments);
-  return { segments, cost: best.cost, baselineCost, improved: true };
+  return { segments, cost: best.cost, baselineCost, improved: true, joins: best.joins, reviewed };
 }
