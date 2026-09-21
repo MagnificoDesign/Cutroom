@@ -129,6 +129,9 @@ export class Vault {
         const meta = JSON.parse(decoder.decode(await unseal(key, record, `meta/${id}`)));
         clips.push({ ...meta, id });
       }
+      // v0.4 records had no import timestamp; retain their stable existing order.
+      // New imports keep selection order across a lock/reload instead of UUID order.
+      clips.sort((a, b) => (a.importedAt || 0) - (b.importedAt || 0));
       check(signal);
       this.key = key;
       return clips;
@@ -172,7 +175,7 @@ export class Vault {
           this.assertUnlocked(signal);
           onProgress(Math.min(file.size, (i + 1) * CHUNK_SIZE), file.size);
         }
-        const meta = { name: file.name, size: file.size, type: file.type || 'video/mp4', count, ...info };
+        const meta = { name: file.name, size: file.size, type: file.type || 'video/mp4', count, ...info, importedAt: Date.now() };
         const encrypted = await seal(this.key, encoder.encode(JSON.stringify(meta)), `meta/${id}`);
         this.assertUnlocked(signal);
         await put(this.db, 'clips', id, encrypted, signal);

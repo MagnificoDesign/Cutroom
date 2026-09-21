@@ -1,0 +1,10 @@
+Cutroom v0.5 includes MediaBunny 1.58.1, by Vanilagy and contributors.
+
+mediabunny.mjs is copied unchanged from the npm package's
+dist/bundles/mediabunny.min.mjs. It runs locally in the user's browser.
+
+License: Mozilla Public License 2.0; included as mediabunny.LICENSE.txt.
+Corresponding source for the included version:
+https://github.com/Vanilagy/mediabunny/tree/v1.58.1
+Source tag commit: f953be9828cfe9e11d4eb51e11ba26121badfed0
+Project: https://github.com/Vanilagy/mediabunny
