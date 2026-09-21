@@ -6,7 +6,8 @@
     "test": "node --test core.test.mjs continuity.test.mjs vault.test.mjs storage.test.mjs planner.test.mjs render-core.test.mjs overlap.test.mjs audio-cuts.test.mjs motion.test.mjs quality.test.mjs cut-timing.test.mjs reliability.test.mjs join-quality.test.mjs",
     "test:browser": "node browser.test.mjs",
     "test:quality": "node quality-browser.test.mjs",
-    "test:continuity": "node continuity-browser.test.mjs"
+    "test:continuity": "node continuity-browser.test.mjs",
+    "test:connections": "node connection-browser.test.mjs"
   },
   "devDependencies": {
     "@sparticuz/chromium": "153.0.0",

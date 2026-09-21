@@ -1,6 +1,7 @@
 export const MAX_BANK_CLIPS = 500;
 export const MAX_BANK_SECONDS = 30 * 60;
-export const MAX_EDIT_SECONDS = 4 * 60;
+// Runtime is determined by usable connections, not an arbitrary short target.
+export const MAX_EDIT_SECONDS = MAX_BANK_SECONDS;
 export const MIN_PIECE = .5;
 
 export function checkBank(clips) {

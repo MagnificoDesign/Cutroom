@@ -22,9 +22,9 @@ for (let take = 0; take < 6; take++) {
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', '320x180', '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '4', '-c:v', 'libx264', '-crf', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', path], { input: raw });
   fixtures.set('/fixtures/' + name, readFileSync(path));
 }
-const longSource = resolve(directory, 'four-minute.mp4');
-execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=12', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-t', '240', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', longSource]);
-fixtures.set('/fixtures/four-minute.mp4', readFileSync(longSource));
+const longSource = resolve(directory, 'five-minute.mp4');
+execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=12', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-t', '300', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', longSource]);
+fixtures.set('/fixtures/five-minute.mp4', readFileSync(longSource));
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
   if (path === '/') { response.end('<!doctype html><title>Continuity tests</title>'); return; }
@@ -46,9 +46,9 @@ try {
   page.on('request', request => { if (/^https?:/.test(request.url()) && (!request.url().startsWith(base + '/') || request.method() !== 'GET')) requests.push(request.url()); });
   await page.goto(base);
   const result = await page.evaluate(async () => {
-    const { analyzeContinuity } = await import('/continuity.mjs?v=13');
-    const { probe } = await import('/media.mjs?v=13');
-    const { renderEdit } = await import('/renderer.mjs?v=13');
+    const { analyzeContinuity } = await import('/continuity.mjs?v=14');
+    const { probe } = await import('/media.mjs?v=14');
+    const { renderEdit } = await import('/renderer.mjs?v=14');
     const clips = [], blobs = new Map();
     // Deliberately shuffled: the bank is not already a timeline.
     for (const take of [3, 0, 5, 1, 4, 2]) {
@@ -106,25 +106,25 @@ try {
   assert.deepEqual(errors, []); assert.deepEqual(requests, []);
   console.log(`PASS continuity: 6 shuffled four-second takes → ${result.duration.toFixed(3)}s, ${result.segments.length} pieces, ${result.checked} candidate connections checked in ${(result.selectedMs / 1000).toFixed(2)}s. All 240 world frames appear once; source tone is audible throughout. Motion steps ${Math.min(...steps).toFixed(3)}–${Math.max(...steps).toFixed(3)}px.`);
   const long = await page.evaluate(async () => {
-    const { renderEdit } = await import('/renderer.mjs?v=13');
+    const { renderEdit } = await import('/renderer.mjs?v=14');
     const { AudioBufferSource } = await import('/mediabunny.mjs?v=6');
     const add = AudioBufferSource.prototype.add; let blocks = 0, maximum = 0;
     AudioBufferSource.prototype.add = function(buffer) { blocks++; maximum = Math.max(maximum, buffer.length); return add.call(this, buffer); };
-    const blob = await (await fetch('/fixtures/four-minute.mp4')).blob();
-    const clip = { id: 'long', name: 'four-minute.mp4', duration: 240, width: 160, height: 90 };
+    const blob = await (await fetch('/fixtures/five-minute.mp4')).blob();
+    const clip = { id: 'long', name: 'five-minute.mp4', duration: 300, width: 160, height: 90 };
     try {
-      const result = await renderEdit({ clips: [clip], segments: [{ id: 'long', start: 0, end: 240 }], getBlob: () => blob, signal: new AbortController().signal });
+      const result = await renderEdit({ clips: [clip], segments: [{ id: 'long', start: 0, end: 300 }], getBlob: () => blob, signal: new AbortController().signal });
       return { blocks, maximum, duration: result.duration, extension: result.extension, bytes: Array.from(new Uint8Array(await result.blob.arrayBuffer())) };
     } finally { AudioBufferSource.prototype.add = add; }
   });
-  assert.equal(long.blocks, 240); assert.equal(long.maximum, 48000); assert(Math.abs(long.duration - 240) < .03);
-  const longPath = resolve(directory, `four-minute-export.${long.extension}`);
+  assert.equal(long.blocks, 300); assert.equal(long.maximum, 48000); assert(Math.abs(long.duration - 300) < .03);
+  const longPath = resolve(directory, `five-minute-export.${long.extension}`);
   await writeFile(longPath, new Uint8Array(long.bytes));
   const info = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_entries', 'stream=codec_type,nb_read_frames,duration:format=duration', '-of', 'json', longPath], { encoding: 'utf8' }));
-  assert.equal(Number(info.streams.find(s => s.codec_type === 'video').nb_read_frames), 2880);
-  assert(info.streams.some(s => s.codec_type === 'audio')); assert(Math.abs(Number(info.format.duration) - 240) < .03);
+  assert.equal(Number(info.streams.find(s => s.codec_type === 'video').nb_read_frames), 3600);
+  assert(info.streams.some(s => s.codec_type === 'audio')); assert(Math.abs(Number(info.format.duration) - 300) < .03);
   const pcm = execFileSync('ffmpeg', ['-v', 'error', '-i', longPath, '-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-'], { maxBuffer: 16 * 1048576 });
-  for (const time of [.2, 120, 239.5]) {
+  for (const time of [.2, 150, 299.5]) {
     let energy = 0, crossings = 0, prior = 0;
     for (let i = Math.round(time * 8000); i < Math.round((time + .2) * 8000); i++) {
       const value = pcm.readFloatLE(i * 4); energy += value * value;
@@ -133,5 +133,5 @@ try {
     assert(energy > 2 && Math.abs(crossings * 5 - 440) <= 5);
   }
   assert.deepEqual(errors, []); assert.deepEqual(requests, []);
-  console.log('PASS continuity: real four-minute export retains all 2880 pictures, audible source tone at beginning/middle/end and 240 bounded one-second audio blocks.');
+  console.log('PASS continuity: real five-minute export retains all 3600 pictures, audible source tone at beginning/middle/end and 300 bounded one-second audio blocks.');
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

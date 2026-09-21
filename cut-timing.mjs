@@ -27,8 +27,8 @@ export function nearbyFrames(clip, start, end, { pad = 0, limit = 1500 } = {}) {
   return selected.length <= limit ? selected : Array.from({ length: limit }, (_, i) => selected[Math.round(i * (selected.length - 1) / (limit - 1))]);
 }
 
-export function coarseFrames(clip) {
-  const times = clip.frameTimes, requested = [times[0]], step = Math.max(.25, clip.duration / 99);
+export function coarseFrames(clip, { interval = .25, limit = 100 } = {}) {
+  const times = clip.frameTimes, requested = [times[0]], step = Math.max(interval, clip.duration / Math.max(1, limit - 1));
   for (let time = step; time < clip.duration; time += step) requested.push(times[Math.max(0, lowerBound(times, time) - 1)]);
   requested.push(times.at(-1));
   return [...new Set(requested)].filter(Number.isFinite);

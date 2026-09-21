@@ -1,4 +1,4 @@
-import { trackMotion } from './motion.mjs?v=9';
+import { trackMotion } from './motion.mjs?v=14';
 
 const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] || 0;
 const clamp = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
@@ -101,6 +101,48 @@ export async function validateBridgeImages(bridge, a, b, signal) {
   }
   signal?.throwIfAborted();
   return count > width * height * .85 && sum / count <= .025 && bad / count <= .012 && worstPatch(errors, width, height) <= .13;
+}
+
+// A matched source-frame cut may tolerate small appearance differences. This
+// test never authorizes synthesizing pictures: interpolation retains its stricter
+// validation above. Subtract only a small, global color offset when comparing;
+// local subject changes must still pass the residual and worst-patch checks.
+export async function validateMatchImages(field, a, b, signal) {
+  if (a.width !== b.width || a.height !== b.height) return false;
+  const step = Math.max(1, Math.floor(Math.max(a.width, a.height) / 384));
+  const width = Math.ceil(a.width / step), height = Math.ceil(a.height / step);
+  const differences = new Float32Array(width * height * 3), valid = new Uint8Array(width * height);
+  const histograms = Array.from({ length: 3 }, () => new Uint32Array(511));
+  let count = 0;
+  for (let y = 0; y < height; y++) {
+    if (!(y % 12)) { signal?.throwIfAborted(); await new Promise(resolve => setTimeout(resolve, 0)); }
+    for (let x = 0; x < width; x++) {
+      const p = warpedCoordinates(field, x * step, y * step, a.width, a.height, .5), i = y * width + x;
+      if (!p.validA || !p.validB) continue;
+      valid[i] = 1; count++;
+      for (let c = 0; c < 3; c++) {
+        const difference = rgbaAt(a, p.ax, p.ay, c) - rgbaAt(b, p.bx, p.by, c);
+        differences[i * 3 + c] = difference / 255;
+        histograms[c][Math.round(difference) + 255]++;
+      }
+    }
+  }
+  if (count <= width * height * .85) return false;
+  const bias = histograms.map(histogram => {
+    let n = 0;
+    for (let i = 0; i < histogram.length; i++) { n += histogram[i]; if (n >= count / 2) return (i - 255) / 255; }
+    return 0;
+  });
+  if (bias.some(value => Math.abs(value) > .05) || Math.max(...bias) - Math.min(...bias) > .04) return false;
+  const errors = new Float32Array(width * height);
+  let total = 0, bad = 0;
+  for (let i = 0; i < valid.length; i++) if (valid[i]) {
+    let error = 0;
+    for (let c = 0; c < 3; c++) error += Math.abs(differences[i * 3 + c] - bias[c]) / 3;
+    errors[i] = error; total += error; if (error > .14) bad++;
+  }
+  signal?.throwIfAborted();
+  return total / count <= .04 && bad / count <= .025 && worstPatch(errors, width, height) <= .18;
 }
 
 function alignedError(bridge, a, b) {

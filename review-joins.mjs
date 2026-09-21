@@ -1,7 +1,7 @@
-import { pictures } from './transitions.mjs?v=13';
-import { judgeJoin } from './join-quality.mjs?v=12';
-import { outputSize } from './quality.mjs?v=11';
-import { check } from './vault.mjs?v=10';
+import { pictures } from './transitions.mjs?v=14';
+import { judgeJoin } from './join-quality.mjs?v=14';
+import { outputSize } from './quality.mjs?v=14';
+import { check } from './vault.mjs?v=14';
 
 // Read only a short sequence around one enhanced join at a time. This examines
 // the actual encoded movie after full-size warping/color work, including the

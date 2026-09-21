@@ -1,8 +1,8 @@
-import { clamp, frameSimilarity, motion } from './core.mjs?v=6';
-import { soundAllowsCut, pauseCandidates } from './audio-cuts.mjs?v=12';
-import { predictPicture } from './motion.mjs?v=9';
+import { clamp, frameSimilarity, motion } from './core.mjs?v=14';
+import { soundAllowsCut, pauseCandidates } from './audio-cuts.mjs?v=14';
+import { predictPicture } from './motion.mjs?v=14';
 
-import { cutAt } from './cut-timing.mjs?v=12';
+import { cutAt } from './cut-timing.mjs?v=14';
 
 const minimumKeep = clip => Math.min(clip.duration, Math.max(.5, clip.duration * .45));
 const closest = (frames, time) => frames.reduce((best, frame) => Math.abs(frame.t - time) < Math.abs(best.t - time) ? frame : best, frames[0]);

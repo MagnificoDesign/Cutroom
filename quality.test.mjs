@@ -14,6 +14,16 @@ test('quality profiles use 1080p, preserve aspect/no upscale, and bound long exp
   assert.equal(outputProfiles([{ width: 320, height: 180, rate: 24 }], 12)[0].width, 320);
   assert.equal(outputProfiles([{ ...hd, width: 1080, height: 1920 }], 12)[0].height, 1920);
 });
+test('25-minute exports retain their duration within the encoded-file budget', () => {
+  for (const duration of [300, 1500, 1800]) {
+    const profiles = outputProfiles([{ width: 1920, height: 1080, rate: 30 }], duration);
+    assert(profiles.length > 0);
+    assert(profiles.every(p => (p.bitrate + 192000) * duration / 8 <= 192 * 1048576 * .9));
+    assert(profiles.every(p => !p.bitrateCap || p.bitrate <= p.bitrateCap));
+  }
+  const small = outputProfiles([{ width: 160, height: 90, rate: 12 }], 1500)[0];
+  assert.equal(small.width, 160); assert.equal(small.height, 90); assert.equal(small.frameRate, 12);
+});
 test('source timing includes cuts between pictures, VFR and the entire last picture', () => {
   for (const rate of [24, 30, 60, 24000 / 1001, 60000 / 1001]) {
     const source = packets(rate, 60), end = 60 / rate;

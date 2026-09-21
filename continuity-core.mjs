@@ -1,7 +1,7 @@
-import { frameSimilarity } from './core.mjs?v=6';
-import { flow } from './planner.mjs?v=13';
-import { MAX_EDIT_SECONDS, minimumPiece } from './edit-policy.mjs?v=13';
-import { cutAt } from './cut-timing.mjs?v=12';
+import { frameSimilarity } from './core.mjs?v=14';
+import { flow } from './planner.mjs?v=14';
+import { MAX_EDIT_SECONDS, minimumPiece } from './edit-policy.mjs?v=14';
+import { cutAt } from './cut-timing.mjs?v=14';
 
 export function sourceEnd(clip, frame) {
   if (!clip.frameTimes) return Math.min(clip.duration, frame.timestamp + frame.duration);
@@ -14,7 +14,17 @@ export function sourceEnd(clip, frame) {
 }
 
 export function compactFrames(frames) {
-  const compact = frames.map(({ pixels, gray, inField, nextPicture, ...frame }) => ({ ...frame, tile: Float32Array.from(frame.tile), edge: Float32Array.from(frame.edge) }));
+  const compact = frames.map(({ pixels, gray, image, inField, nextPicture, ...frame }) => {
+    // A 144-byte spatial fingerprint retains enough layout detail to rank
+    // lookalike takes, without retaining the 96×54 decoded pictures.
+    const detail = new Uint8Array(16 * 9);
+    if (pixels) for (let y = 0; y < 9; y++) for (let x = 0; x < 16; x++) {
+      let sum = 0;
+      for (let dy = 0; dy < 6; dy++) for (let dx = 0; dx < 6; dx++) sum += pixels[(y * 6 + dy) * 96 + x * 6 + dx];
+      detail[y * 16 + x] = Math.round(sum / 36);
+    }
+    return { ...frame, detail, tile: Float32Array.from(frame.tile), edge: Float32Array.from(frame.edge) };
+  });
   for (let i = 1; i < frames.length; i++) {
     const vector = flow(frames[i - 1], frames[i]);
     compact[i - 1].outMotion = vector; compact[i].inMotion = vector;
@@ -23,7 +33,7 @@ export function compactFrames(frames) {
 }
 
 function embedding(frame) {
-  const values = new Float32Array(38);
+  const values = new Float32Array(182);
   for (let y = 0; y < 3; y++) for (let x = 0; x < 4; x++) {
     const index = y * 4 + x;
     for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
@@ -34,6 +44,7 @@ function embedding(frame) {
     values[24 + index] = frame.chroma?.[index] || 0;
   }
   values[36] = frame.mean * .25; values[37] = Math.sqrt(frame.variance) * .5;
+  if (frame.detail) for (let i = 0; i < 144; i++) values[38 + i] = (frame.detail[i] / 255 - frame.mean) * .6;
   return values;
 }
 
@@ -44,7 +55,7 @@ export function makeIndex(items) {
     if (!list.length) return null;
     if (list.length <= 12) return { items: list };
     let axis = 0, spread = -1;
-    for (let d = 0; d < 38; d++) {
+    for (let d = 0; d < list[0].vector.length; d++) {
       let low = Infinity, high = -Infinity;
       for (const item of list) { low = Math.min(low, item.vector[d]); high = Math.max(high, item.vector[d]); }
       if (high - low > spread) { axis = d; spread = high - low; }
@@ -56,7 +67,7 @@ export function makeIndex(items) {
   return build([...items]);
 }
 
-export function nearestFrames(tree, vector, { count = 64, visits = 256 } = {}) {
+export function nearestFrames(tree, vector, { count = 96, visits = 384 } = {}) {
   const best = []; let visited = 0;
   const search = node => {
     if (!node || ++visited > visits) return;
@@ -94,6 +105,13 @@ function coarseMotion(a, b) {
   return .7 * (1 - cosine) / 2 + .3 * Math.abs(aa - bb) / Math.max(aa, bb);
 }
 
+function detailDifference(a, b) {
+  if (!a.detail || !b.detail) return 0;
+  let error = 0;
+  for (let i = 0; i < a.detail.length; i++) error += Math.abs((a.detail[i] - b.detail[i]) / 255 - a.mean + b.mean);
+  return error / a.detail.length;
+}
+
 export async function proposeConnections(clips, signal, onProgress = () => {}) {
   const entries = [];
   clips.forEach((clip, index) => clip.samples.forEach(frame => {
@@ -112,24 +130,39 @@ export async function proposeConnections(clips, signal, onProgress = () => {}) {
         const b = match.index, other = clips[b];
         if (a === b || Math.abs(clip.width / clip.height / (other.width / other.height) - 1) > .01) continue;
         const similarity = frameSimilarity(frame, match.frame), movement = coarseMotion(frame.inMotion, match.frame.outMotion);
-        if (similarity < .88 || movement > .58) continue;
-        const cost = .7 * (1 - similarity) + .3 * movement;
+        if (similarity < .86 || movement > .58) continue;
+        const cost = .4 * (1 - similarity) + .2 * movement + .4 * Math.min(1, detailDifference(frame, match.frame) * 5);
         if (!pairs.has(b)) pairs.set(b, []);
         pairs.get(b).push({ a: clip.id, b: other.id, end, start: match.frame.t, cost, status: 'coarse' });
       }
+    }
+    // Keep promising untouched boundaries in the search as well. Dense short-
+    // clip sampling must not crowd out the original end/start, especially when
+    // a small motion gap can be bridged without discarding any source time.
+    const last = clip.samples.at(-1);
+    for (let b = 0; b < clips.length; b++) {
+      const other = clips[b], first = other.samples[0];
+      if (a === b || !last || !first || Math.abs(clip.width / clip.height / (other.width / other.height) - 1) > .01) continue;
+      const similarity = frameSimilarity(last, first), detail = detailDifference(last, first);
+      if (similarity < .86 || detail > .07) continue;
+      const cost = .4 * (1 - similarity) + .2 * coarseMotion(last.inMotion, first.outMotion) + .4 * Math.min(1, detail * 5);
+      if (!pairs.has(b)) pairs.set(b, []);
+      pairs.get(b).push({ a: clip.id, b: other.id, end: clip.duration, start: 0, cost, status: 'coarse', boundary: true });
     }
     const choices = [];
     for (const [b, candidates] of pairs) {
       candidates.sort((x, y) => x.cost - y.cost || y.end - x.end || x.start - y.start);
       const diverse = [];
       for (const candidate of candidates) {
-        if (diverse.some(e => Math.abs(e.end - candidate.end) < .35 && Math.abs(e.start - candidate.start) < .35)) continue;
-        diverse.push(candidate); if (diverse.length === 3) break;
+        if (diverse.some(e => Math.abs(e.end - candidate.end) < .24 && Math.abs(e.start - candidate.start) < .24)) continue;
+        diverse.push(candidate); if (diverse.length === 6) break;
       }
+      const boundary = candidates.find(e => e.boundary);
+      if (boundary && !diverse.some(e => e.end === boundary.end && e.start === 0)) diverse.push(boundary);
       choices.push({ b, score: diverse[0].cost, edges: diverse });
     }
     choices.sort((a, b) => a.score - b.score || a.b - b.b);
-    for (const choice of choices.slice(0, 10)) for (const edge of choice.edges) edges.push({ ...edge, key: `${edge.a}/${edge.b}/${edge.end.toFixed(6)}/${edge.start.toFixed(6)}` });
+    for (const choice of choices.slice(0, 20)) for (const edge of choice.edges) edges.push({ ...edge, key: `${edge.a}/${edge.b}/${edge.end.toFixed(6)}/${edge.start.toFixed(6)}` });
     await new Promise(resolve => setTimeout(resolve, 0));
   }
   return edges;
@@ -138,8 +171,8 @@ export async function proposeConnections(clips, signal, onProgress = () => {}) {
 // A path carries its incoming cut. An outgoing edge is usable only if that
 // middle clip still contributes a valid interval. BigInt masks support hundreds
 // of clips without 32-bit aliasing; linked parents avoid copying whole paths.
-export async function selectSequence(clips, edges, { signal, target = MAX_EDIT_SECONDS, confirmedOnly = false, beamWidth = 96 } = {}) {
-  if (!(target > 0) || target > MAX_EDIT_SECONDS) throw new Error('The finished video must be four minutes or shorter.');
+export async function selectSequence(clips, edges, { signal, target = MAX_EDIT_SECONDS, confirmedOnly = false, beamWidth = 128 } = {}) {
+  if (!(target > 0) || target > MAX_EDIT_SECONDS) throw new Error('Choose up to 30 minutes for one edit.');
   const index = new Map(clips.map((clip, i) => [clip.id, i])), byId = new Map(clips.map(c => [c.id, c]));
   const outgoing = new Map(clips.map(c => [c.id, []]));
   for (const edge of edges) if ((!confirmedOnly || edge.status === 'verified') && edge.status !== 'rejected' && outgoing.has(edge.a) && byId.has(edge.b) && [edge.end, edge.start, edge.cost].every(Number.isFinite) && edge.start >= 0 && edge.end > 0) outgoing.get(edge.a).push(edge);
@@ -157,12 +190,18 @@ export async function selectSequence(clips, edges, { signal, target = MAX_EDIT_S
     const next = new Map();
     for (const state of beam) {
       const terminal = finish(state);
-      if (terminal && (!best || terminal.score > best.score + 1e-8)) best = terminal;
+      // A short connected edit must reach verification instead of losing to a
+      // longer untouched source. Among connected routes, retain the most usable
+      // time subject to the same join-quality penalties. No unchecked join can
+      // enter the final confirmed-only pass.
+      if (terminal && (!best || !!state.depth > !!best.state.depth
+        || !!state.depth === !!best.state.depth && terminal.score > best.score + 1e-8)) best = terminal;
       const clip = byId.get(state.id);
       for (const edge of outgoing.get(state.id)) {
         const b = index.get(edge.b), bit = 1n << BigInt(b), following = byId.get(edge.b);
-        const requiredKeep = Math.max(minimumPiece(following), edge.requiresBridge ? .6 : 0);
-        const currentKeep = Math.max(minimumPiece(clip), state.requiredKeep || 0, edge.requiresBridge ? .6 : 0);
+        const effectKeep = edge.requiresBridge || edge.requiresFinishing ? .6 : 0;
+        const requiredKeep = Math.max(minimumPiece(following), effectKeep);
+        const currentKeep = Math.max(minimumPiece(clip), state.requiredKeep || 0, effectKeep);
         if (state.mask & bit || edge.end > clip.duration + 1e-7 || edge.end - state.start < currentKeep - 1e-7 || following.duration - edge.start < requiredKeep - 1e-7) continue;
         const elapsed = state.elapsed + edge.end - state.start;
         if (elapsed + requiredKeep > target + 1e-7) continue;
@@ -175,7 +214,7 @@ export async function selectSequence(clips, edges, { signal, target = MAX_EDIT_S
     }
     const perEnd = new Map();
     beam = [...next.values()].sort((a, b) => b.rank - a.rank).filter(state => {
-      const count = perEnd.get(state.id) || 0; perEnd.set(state.id, count + 1); return count < 4;
+      const count = perEnd.get(state.id) || 0; perEnd.set(state.id, count + 1); return count < 6;
     }).slice(0, beamWidth);
     await new Promise(resolve => setTimeout(resolve, 0));
   }

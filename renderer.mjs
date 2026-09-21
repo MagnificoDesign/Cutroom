@@ -3,23 +3,23 @@ import {
   CanvasSource, VideoSampleSink, AudioBufferSink, AudioBufferSource, EncodedVideoPacketSource, Quality,
   canEncodeVideo, canEncodeAudio
 } from './mediabunny.mjs?v=6';
-import { check } from './vault.mjs?v=10';
-import { MAX_EDIT_SECONDS } from './edit-policy.mjs?v=13';
-import { validatePlan } from './planner.mjs?v=13';
-import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=12';
-import { audioChunks } from './render-core.mjs?v=12';
-import { guarded } from './media.mjs?v=13';
-import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=13';
-import { interpolateFrame } from './transition-core.mjs?v=13';
-import { inspectSources } from './export-inspect.mjs?v=11';
-import { outputProfiles, videoBitrate, frameSlots, MAX_EXPORT_BYTES } from './quality.mjs?v=11';
-import { createPainter } from './color-gpu.mjs?v=11';
-import { applyColor } from './color.mjs?v=11';
-import { finishingAt, drawFinishing } from './finish-core.mjs?v=11';
-import { copyPlan, copyPictures } from './packet-copy.mjs?v=11';
+import { check } from './vault.mjs?v=14';
+import { MAX_EDIT_SECONDS } from './edit-policy.mjs?v=14';
+import { validatePlan } from './planner.mjs?v=14';
+import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=14';
+import { audioChunks } from './render-core.mjs?v=14';
+import { guarded } from './media.mjs?v=14';
+import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=14';
+import { interpolateFrame } from './transition-core.mjs?v=14';
+import { inspectSources } from './export-inspect.mjs?v=14';
+import { outputProfiles, videoBitrate, frameSlots, MAX_EXPORT_BYTES } from './quality.mjs?v=14';
+import { createPainter } from './color-gpu.mjs?v=14';
+import { applyColor } from './color.mjs?v=14';
+import { finishingAt, drawFinishing } from './finish-core.mjs?v=14';
+import { copyPlan, copyPictures } from './packet-copy.mjs?v=14';
 
-import { reviewJoins } from './review-joins.mjs?v=12';
-import { encodingStep, ExportResourceError, saferProfile } from './export-recovery.mjs?v=12';
+import { reviewJoins } from './review-joins.mjs?v=14';
+import { encodingStep, ExportResourceError, saferProfile } from './export-recovery.mjs?v=14';
 
 export async function selectFormat(size) {
   if (typeof VideoEncoder === 'undefined' || typeof AudioEncoder === 'undefined') return null;
@@ -195,6 +195,7 @@ async function verifiedAttempt(options) {
   const { expectedSound, ...result } = await renderAttempt(options);
   check(options.signal);
   if (options.requiredBridges?.some(index => !result.smoothedJoins.some(join => join.index === index))) throw new Error('A selected connection could not be smoothed reliably. Your clips are still ready; try removing one of the similar takes.');
+  if (options.requiredFinishing?.some(index => !result.finishedJoins.some(join => join.index === index))) throw new Error('A selected framing or color match could not be finished reliably. Your clips are still ready.');
   options.onProgress({ stage: 'Checking picture and audio…', fraction: .97 });
   const verified = await verifyExport(result.blob, options.total, expectedSound, options.signal, options.timeline);
   check(options.signal);
@@ -204,9 +205,11 @@ async function verifiedAttempt(options) {
 export async function renderEdit({ clips, segments, plan, getBlob, signal, onProgress = () => {} }) {
   validatePlan(clips, segments, { allowSubset: !!plan?.continuity });
   const timeline = renderTimeline(segments), total = timeline.reduce((sum, part) => sum + part.duration, 0);
-  if (total > MAX_EDIT_SECONDS + .02) throw new Error('Keep the finished edit to four minutes or less.');
+  if (total > MAX_EDIT_SECONDS + .02) throw new Error('Choose up to 30 minutes for one edit.');
   const byId = new Map(clips.map(clip => [clip.id, clip])), ordered = timeline.map(part => byId.get(part.id));
   const requiredBridges = plan?.continuity ? timeline.slice(1).flatMap((part, index) => plan.joins?.some(join => join.a === timeline[index].id && join.b === part.id && join.requiresBridge) ? [index] : []) : [];
+  const requiredFinishing = plan?.continuity ? timeline.slice(1).flatMap((part, index) => plan.joins?.some(join => join.a === timeline[index].id && join.b === part.id && join.requiresFinishing) ? [index] : []) : [];
+  const requiredEffects = new Set([...requiredBridges, ...requiredFinishing]);
   check(signal); onProgress({ stage: 'Preparing your video…', fraction: 0 });
   const cached = new Map((plan?.sourceInfos || []).map(info => [info.id, info]));
   const infos = ordered.every(clip => cached.has(clip.id)) ? ordered.map(clip => cached.get(clip.id)) : await inspectSources(ordered, getBlob, signal, onProgress);
@@ -218,17 +221,18 @@ export async function renderEdit({ clips, segments, plan, getBlob, signal, onPro
     const joins = [];
     for (let index = 0; index < timeline.length - 1; index++) {
       check(signal);
-      if (simple && !requiredBridges.includes(index) || !canSmoothJoin(clips, timeline, index, plan)) { joins.push(null); continue; }
+      if (simple && !requiredEffects.has(index) || !canSmoothJoin(clips, timeline, index, plan)) { joins.push(null); continue; }
       onProgress({ stage: `Checking connection ${index + 1} of ${timeline.length - 1}…`, fraction: 0 });
-      joins.push(await inspectJoin({ clipA: ordered[index], clipB: ordered[index + 1], partA: timeline[index], partB: timeline[index + 1], size: profile, getBlob, signal }));
+      joins.push(await inspectJoin({ clipA: ordered[index], clipB: ordered[index + 1], partA: timeline[index], partB: timeline[index + 1], size: profile, getBlob, signal, requireFinishing: requiredFinishing.includes(index) }));
     }
     if (requiredBridges.some(index => joins[index]?.kind !== 'bridge')) throw new Error('A selected connection could not be smoothed reliably. Your clips are still ready; try removing one of the similar takes.');
+    if (requiredFinishing.some(index => joins[index]?.kind !== 'finishing')) throw new Error('A selected framing or color match could not be finished reliably. Your clips are still ready.');
     return joins;
   };
   // A copy-only browser can still use the original dimensions for join checks.
   let joins = await prepare(size || profiles[0] || { width: infos[0].width, height: infos[0].height, frameRate: 60 });
   const copy = await copyPlan(infos, timeline, joins, signal);
-  const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress, requiredBridges };
+  const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress, requiredBridges, requiredFinishing };
   if (copy) {
     try {
       return await verifiedAttempt({ ...parameters, joins, copy, format: copy.format, size: { width: copy.width, height: copy.height } });
@@ -257,13 +261,13 @@ export async function renderEdit({ clips, segments, plan, getBlob, signal, onPro
     const checked = await reviewJoins({ result, ordered, getBlob, signal, onProgress });
     qualityChecks = qualityChecks.concat(checked);
     const rejected = checked.filter(join => !join.ok);
-    if (rejected.some(join => requiredBridges.includes(join.index))) throw new Error('A smoothed connection did not pass the finished-picture check. Your clips are still ready; try removing one of the similar takes.');
+    if (rejected.some(join => requiredEffects.has(join.index))) throw new Error('A matched connection did not pass the finished-picture check. Your clips are still ready; try removing one of the similar takes.');
     if (rejected.length && !simplified) {
       // Retry once with original pictures at the same chosen cuts. Removing all
       // optional effects prevents a second enhancement/review loop, and never
       // changes footage selection, duration, order or sound.
-      simplified = true; simplifiedJoins = joins.flatMap((join, index) => join && !requiredBridges.includes(index) ? [{ index, reason: rejected.find(item => item.index === index)?.reason || 'simpler-export' }] : []);
-      result.blob = null; result = null; joins = joins.map((join, index) => requiredBridges.includes(index) ? join : null);
+      simplified = true; simplifiedJoins = joins.flatMap((join, index) => join && !requiredEffects.has(index) ? [{ index, reason: rejected.find(item => item.index === index)?.reason || 'simpler-export' }] : []);
+      result.blob = null; result = null; joins = joins.map((join, index) => requiredEffects.has(index) ? join : null);
       onProgress({ stage: 'Using cleaner original-frame connections…', fraction: 0 });
       await new Promise(resolve => setTimeout(resolve, 0));
       continue;

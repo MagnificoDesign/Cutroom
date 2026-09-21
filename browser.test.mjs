@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { resolve, extname, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -11,20 +12,22 @@ const root = fileURLToPath(new URL('./', import.meta.url));
 const output = resolve(root, 'test-results');
 const fixtureBytes = new Map();
 await mkdir(output, { recursive: true });
+const fixturesDirectory = mkdtempSync(resolve(tmpdir(), 'cutroom-browser-'));
+// Build reference inputs outside the synchronized workspace.
 // Synthetic picture and sound only. No personal media is used or uploaded.
-const fixture = resolve(output, 'harmless.mp4');
+const fixture = resolve(fixturesDirectory, 'harmless.mp4');
 execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=12', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', fixture]);
 const video = await readFile(fixture);
 fixtureBytes.set('harmless.mp4', video);
 const largeVideo = Buffer.concat([video, Buffer.alloc(12 * 1024 * 1024)]);
 for (const [color, frequency] of [['red', 440], ['lime', 660], ['blue', 880]]) {
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:size=160x90:rate=30`, '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=44100`, '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', resolve(output, `${color}.mp4`)]);
-  fixtureBytes.set(`${color}.mp4`, readFileSync(resolve(output, `${color}.mp4`)));
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:size=160x90:rate=30`, '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=44100`, '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', resolve(fixturesDirectory, `${color}.mp4`)]);
+  fixtureBytes.set(`${color}.mp4`, readFileSync(resolve(fixturesDirectory, `${color}.mp4`)));
 }
 // One eight-second event, split into overlapping 0–4, 2–6 and 4–8 clips.
 // A visible binary frame number lets an independent decoder prove that the
 // merged result contains each original frame once, without skipped/replayed time.
-const master = resolve(output, 'overlap-master.mp4');
+const master = resolve(fixturesDirectory, 'overlap-master.mp4');
 const raw = Buffer.alloc(240 * 160 * 90 * 3);
 for (let frame = 0; frame < 240; frame++) for (let y = 0; y < 90; y++) for (let x = 0; x < 160; x++) {
   const at = ((frame * 90 + y) * 160 + x) * 3;
@@ -47,10 +50,10 @@ for (const [id, offset] of [['pan-a', 0], ['pan-b', 61], ['pan-c', 122]]) {
     const at = ((frame * height + y) * width + x) * 3;
     pixels[at] = pixels[at + 1] = pixels[at + 2] = Math.round(value);
   }
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', `${width}x${height}`, '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2', '-c:v', 'libx264', '-crf', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(output, `${id}.mp4`)], { input: pixels });
-  fixtureBytes.set(`${id}.mp4`, readFileSync(resolve(output, `${id}.mp4`)));
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', resolve(output, `${id}.mp4`), '-vf', 'scale=1280:720', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', resolve(output, `${id}-large.mp4`)]);
-  fixtureBytes.set(`${id}-large.mp4`, readFileSync(resolve(output, `${id}-large.mp4`)));
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', `${width}x${height}`, '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2', '-c:v', 'libx264', '-crf', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(fixturesDirectory, `${id}.mp4`)], { input: pixels });
+  fixtureBytes.set(`${id}.mp4`, readFileSync(resolve(fixturesDirectory, `${id}.mp4`)));
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', resolve(fixturesDirectory, `${id}.mp4`), '-vf', 'scale=1280:720', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', resolve(fixturesDirectory, `${id}-large.mp4`)]);
+  fixtureBytes.set(`${id}-large.mp4`, readFileSync(resolve(fixturesDirectory, `${id}-large.mp4`)));
 }
 // Separate, slightly differently framed shots with a compatible middle view.
 // Their encoded sound has genuine pauses away from the best sparse visual cut.
@@ -67,12 +70,12 @@ for (const [id, width, frequency, pauseStart, pauseEnd] of [['pause-a', 160, 440
     }
   }
   const sound = `aevalsrc=if(between(t\\,${pauseStart}\\,${pauseEnd})\\,0\\,0.12*sin(2*PI*${frequency}*t)):s=48000`;
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', `${width}x90`, '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', sound, '-t', '4', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', resolve(output, `${id}.mp4`)], { input: pixels });
-  fixtureBytes.set(`${id}.mp4`, readFileSync(resolve(output, `${id}.mp4`)));
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', `${width}x90`, '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', sound, '-t', '4', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', resolve(fixturesDirectory, `${id}.mp4`)], { input: pixels });
+  fixtureBytes.set(`${id}.mp4`, readFileSync(resolve(fixturesDirectory, `${id}.mp4`)));
 }
 for (const [name, offset, quality, filter] of [['overlap-a', 0, 19, 'null'], ['overlap-b', 2, 26, 'eq=brightness=0.015:contrast=1.025'], ['overlap-c', 4, 23, 'null']]) {
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-ss', String(offset), '-i', master, '-t', '4', '-vf', filter, '-c:v', 'libx264', '-crf', String(quality), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(output, `${name}.mp4`)]);
-  fixtureBytes.set(`${name}.mp4`, readFileSync(resolve(output, `${name}.mp4`)));
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-ss', String(offset), '-i', master, '-t', '4', '-vf', filter, '-c:v', 'libx264', '-crf', String(quality), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(fixturesDirectory, `${name}.mp4`)]);
+  fixtureBytes.set(`${name}.mp4`, readFileSync(resolve(fixturesDirectory, `${name}.mp4`)));
 }
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
@@ -110,7 +113,7 @@ async function visibility(page, state) {
 }
 async function storedCopies(page) {
   return page.evaluate(async () => {
-    const { openVault } = await import('/vault.mjs?v=10');
+    const { openVault } = await import('/vault.mjs?v=14');
     const vault = await openVault();
     try {
       return await new Promise((resolve, reject) => {
@@ -601,7 +604,7 @@ try {
       assert.match(await page.locator('.selection-note').innerText(), /Used 3 of 25/);
       assert.deepEqual(await page.locator('.edit-review li b').allTextContents(), ['pan-a.mp4', 'pan-b.mp4', 'pan-c.mp4']);
       assert.equal((await storedCopies(page)).clips, 25);
-      await page.screenshot({ path: resolve(output, `${name}-v013-selection.png`), fullPage: true });
+      await page.screenshot({ path: resolve(output, `${name}-v014-selection.png`), fullPage: true });
       await page.locator('#edit').click();
       assert.equal(await page.locator('.clip').count(), 25);
       await page.getByRole('button', { name: 'Remove unused-0.mp4 from this video', exact: true }).click();
@@ -617,8 +620,8 @@ try {
     await run('old import archives are deleted on upgrade and removed clips do not survive locking', async page => {
       await page.goto(base + '/harness');
       await page.evaluate(async password => {
-        const { openVault, seal, CHUNK_SIZE } = await import('/vault.mjs?v=10');
-        const { probe } = await import('/media.mjs?v=13');
+        const { openVault, seal, CHUNK_SIZE } = await import('/vault.mjs?v=14');
+        const { probe } = await import('/media.mjs?v=14');
         const vault = await openVault();
         await vault.unlock(password);
         const blob = await (await fetch('/test-results/harmless.mp4')).blob();
@@ -645,7 +648,7 @@ try {
       assert.equal(await page.locator('#new').count(), 1); // Can clear even the last pending Undo.
       await page.locator('#lock').click();
       await page.waitForFunction(async () => {
-        const { openVault } = await import('/vault.mjs?v=10');
+        const { openVault } = await import('/vault.mjs?v=14');
         const vault = await openVault();
         const count = await new Promise(resolve => {
           vault.db.transaction('clips').objectStore('clips').count().onsuccess = event => resolve(event.target.result);
@@ -875,5 +878,5 @@ try {
     });
     await browser.close();
   }
-} finally { await new Promise(resolve => server.close(resolve)); }
+} finally { await new Promise(resolve => server.close(resolve)); rmSync(fixturesDirectory, { recursive: true, force: true }); }
 if (failures) process.exitCode = 1;

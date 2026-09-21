@@ -1,5 +1,5 @@
-import { readHdr, paintSample, resolveColor } from './color.mjs?v=11';
-import { isHdr } from './quality.mjs?v=11';
+import { readHdr, paintSample, resolveColor } from './color.mjs?v=14';
+import { isHdr } from './quality.mjs?v=14';
 
 const vertex = `#version 300 es
 out vec2 uv;

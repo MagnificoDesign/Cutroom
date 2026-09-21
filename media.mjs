@@ -1,5 +1,5 @@
-import { descriptor } from './core.mjs?v=6';
-import { check } from './vault.mjs?v=6';
+import { descriptor } from './core.mjs?v=14';
+import { check } from './vault.mjs?v=14';
 import { Input, ALL_FORMATS, BlobSource, CanvasSink, AudioBufferSink } from './mediabunny.mjs?v=6';
 
 export function guarded(promise, signal, message = 'This video took too long to process. Try a shorter clip.') {
@@ -132,7 +132,7 @@ export function sample(blob, signal) {
 // Decode only requested windows. Keep small descriptors/PCM, never source URLs.
 // Actual decoder timestamps prevent repeated requests for one frame from being
 // mistaken for consecutive evidence of an overlap.
-export async function inspectMedia(blob, times, signal, { audioRange } = {}) {
+export async function inspectMedia(blob, times, signal, { audioRange, keepImages = false } = {}) {
   check(signal);
   const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
   const abort = () => input.dispose();
@@ -148,7 +148,8 @@ export async function inspectMedia(blob, times, signal, { audioRange } = {}) {
       check(signal);
       if (next.done || !next.value) throw new Error('A video frame could not be inspected.');
       const frame = next.value;
-      frames.push(describePixels(frame.canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, 96, 54).data, times[i], frame.timestamp, frame.duration));
+      const image = frame.canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, 96, 54);
+      frames.push({ ...describePixels(image.data, times[i], frame.timestamp, frame.duration), ...(keepImages ? { image } : {}) });
       if (i % 24 === 0) await new Promise(resolve => setTimeout(resolve, 0));
     }
     await guarded(stream.return(), signal);

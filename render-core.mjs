@@ -1,6 +1,6 @@
 export const FRAME_RATE = 30;
 export const SAMPLE_RATE = 48000;
-export { outputSize } from './quality.mjs?v=11';
+export { outputSize } from './quality.mjs?v=14';
 
 export function renderTimeline(segments) {
   let sample = 0;

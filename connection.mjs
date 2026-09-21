@@ -1,6 +1,7 @@
-import { boundaryCost, signature } from './planner.mjs?v=13';
-import { trackMotion } from './motion.mjs?v=9';
-import { chooseBridge, motionGrid, validateBridgeImages } from './transition-core.mjs?v=13';
+import { boundaryCost, signature } from './planner.mjs?v=14';
+import { trackMotion } from './motion.mjs?v=14';
+import { chooseBridge, motionGrid, validateBridgeImages, validateMatchImages } from './transition-core.mjs?v=14';
+import { chooseFinishing } from './finish-core.mjs?v=14';
 
 const speed = v => Math.hypot(v.x, v.y);
 const compatible = (a, b) => {
@@ -49,6 +50,48 @@ export async function checkConnection(a, b, end, start, signal) {
   // paying for the independent full-size endpoint check.
   if (!await validateBridgeImages(bridge, grayImage(left), grayImage(right), signal)) return null;
   return { cost: Math.max(0, score.cost) + Math.min(error, 2) * .06, bridge, left: left.timestamp, right: right.timestamp, native };
+}
+
+// Related takes need not be pixel-identical. Check a natural, small motion step
+// plus several frames on each side, while allowing minor texture/light changes.
+// Large gaps still require the independently validated interpolation path.
+export async function checkSimilarConnection(a, b, end, start, signal) {
+  signal?.throwIfAborted();
+  const aa = a.samples.filter(f => f.timestamp < end - .00001).slice(-6);
+  const bb = b.samples.filter(f => f.timestamp >= start - .00001).slice(0, 6);
+  if (aa.length < 3 || bb.length < 3 || Math.abs(bb[0].timestamp - start) > .0011) return null;
+  const left = aa.at(-1), right = bb[0], dt = end - left.timestamp;
+  if (dt < .012 || dt > .105 || Math.min(left.variance, right.variance) < .001) return null;
+  const score = boundaryCost(signature(a, end, 'out'), signature(b, start, 'in'));
+  if (score.similarity < .87 || score.mismatch > .28 || score.continuation > .32) return null;
+  const compatibleMotion = (x, y) => {
+    if (!(x?.confidence >= .6 && y?.confidence >= .6)) return false;
+    const xx = speed(x), yy = speed(y);
+    if (xx < .014 && yy < .014) return true;
+    return Math.min(xx, yy) >= .008 && Math.max(xx, yy) / Math.min(xx, yy) <= 2
+      && (x.x * y.x + x.y * y.y) / (xx * yy) >= .88;
+  };
+  const va = left.inMotion, vb = right.outMotion;
+  if (!compatibleMotion(va, vb) || !compatibleMotion(aa.at(-2).inMotion, va) || !compatibleMotion(vb, bb[1].outMotion)) return null;
+  if ((va.local || vb.local) && !compatibleMotion({ ...va.camera, confidence: va.confidence }, { ...vb.camera, confidence: vb.confidence })) return null;
+  const forward = trackMotion(left.pixels, right.pixels), backward = trackMotion(right.pixels, left.pixels);
+  if (Math.min(forward.confidence, backward.confidence) < .68 || Math.min(forward.tracks.length, backward.tracks.length) < 24) return null;
+  const expected = { x: (va.x + vb.x) / 2 * 96 * dt, y: (va.y + vb.y) / 2 * 54 * dt };
+  const error = Math.hypot(forward.x - expected.x, forward.y - expected.y);
+  const cameraError = Math.hypot(forward.camera.x - (va.camera.x + vb.camera.x) / 2 * 96 * dt, forward.camera.y - (va.camera.y + vb.camera.y) / 2 * 54 * dt);
+  const bridge = { forward: motionGrid(forward), backward: motionGrid(backward), m0: 1, m1: 1 };
+  if (error <= Math.max(.45, speed(expected) * .4) && cameraError <= Math.max(.45, speed(expected) * .4)
+    && await validateMatchImages(bridge, grayImage(left), grayImage(right), signal)) {
+    return { cost: Math.max(0, score.cost) + error * .06 + .08, bridge, left: left.timestamp, right: right.timestamp, native: true, similar: true };
+  }
+  // For a nearly still shot, a proven tiny framing/color correction may make the
+  // connection viable. It becomes mandatory in the renderer, never a claim that
+  // the uncorrected cut is seamless.
+  if (aa.every(f => f.image) && bb.every(f => f.image)) {
+    const finishing = chooseFinishing(aa, bb, a.width / a.height);
+    if (finishing) return { cost: Math.max(0, score.cost) + .10, finishing, left: left.timestamp, right: right.timestamp, native: false };
+  }
+  return null;
 }
 
 function grayImage(frame) {

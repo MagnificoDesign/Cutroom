@@ -51,6 +51,21 @@ export function outputProfiles(infos, duration) {
     if ((bitrate + 192000) * duration / 8 > MAX_EXPORT_BYTES * .9) continue;
     profiles.push({ ...size, frameRate, bitrate, reduced: edge < 1920 || frameRate < rate });
   }
+  // Preserve a longer usable sequence instead of silently stopping at four
+  // minutes. If normal profiles exceed the encoded-file budget, fit a smaller
+  // picture and bitrate to the complete duration. Do not allocate a larger file.
+  if (!profiles.length && Number.isFinite(duration) && duration > 0) {
+    const bitrateCap = Math.floor((MAX_EXPORT_BYTES * .9 * 8 / duration - 192000) / 1000) * 1000;
+    for (const edge of [1280, 960, 640, 480]) for (const frameRate of [rate, Math.min(rate, 30)]) {
+      const size = outputSize(reference.width, reference.height, edge);
+      if (profiles.some(p => p.width === size.width && p.height === size.height && p.frameRate === frameRate)) continue;
+      // A floor proportional to picture size prevents forcing a large, muddy
+      // picture into an inadequate bitrate merely to keep its resolution label.
+      if (bitrateCap < Math.max(180000, size.width * size.height * frameRate * .1)) continue;
+      const bitrate = Math.min(videoBitrate(size, frameRate), bitrateCap);
+      profiles.push({ ...size, frameRate, bitrate, bitrateCap, reduced: true });
+    }
+  }
   return profiles;
 }
 

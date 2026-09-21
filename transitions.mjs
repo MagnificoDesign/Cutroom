@@ -1,10 +1,10 @@
 import { Input, ALL_FORMATS, BlobSource, VideoSampleSink } from './mediabunny.mjs?v=6';
-import { guarded, describePixels } from './media.mjs?v=13';
-import { check } from './vault.mjs?v=6';
-import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=13';
-import { FRAME_RATE } from './render-core.mjs?v=12';
-import { createPainter } from './color-gpu.mjs?v=11';
-import { chooseFinishing, validateFinishing } from './finish-core.mjs?v=11';
+import { guarded, describePixels } from './media.mjs?v=14';
+import { check } from './vault.mjs?v=14';
+import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=14';
+import { FRAME_RATE } from './render-core.mjs?v=14';
+import { createPainter } from './color-gpu.mjs?v=14';
+import { chooseFinishing, validateFinishing } from './finish-core.mjs?v=14';
 
 export function canSmoothJoin(clips, timeline, index, plan) {
   if (!plan || index + 1 >= timeline.length || timeline[index].duration < .6 || timeline[index + 1].duration < .6) return false;
@@ -46,7 +46,7 @@ export async function pictures(blob, requests, size, signal, small) {
 
 // At most two full-resolution endpoint images are retained for one bridge.
 // Neighboring clips are opened sequentially and the analysis uses 96×54 images.
-export async function inspectJoin({ clipA, clipB, partA, partB, size, getBlob, signal }) {
+export async function inspectJoin({ clipA, clipB, partA, partB, size, getBlob, signal, requireFinishing = false }) {
   check(signal);
   try {
     const readClip = async (clip, requests, dimensions, small) => {
@@ -63,7 +63,7 @@ export async function inspectJoin({ clipA, clipB, partA, partB, size, getBlob, s
     // two long source movies alive together can exhaust Safari's media budget.
     const a = await readClip(clipA, requestsA, { width: 96, height: 54 }, true);
     const b = await readClip(clipB, requestsB, { width: 96, height: 54 }, true);
-    const bridge = await chooseBridge(a, b, signal); check(signal);
+    const bridge = requireFinishing ? null : await chooseBridge(a, b, signal); check(signal);
     if (bridge) return { kind: 'bridge', bridge, requestsA, requestsB };
     const finishing = chooseFinishing(a, b, clipA.width / clipA.height);
     if (!finishing) return null;
