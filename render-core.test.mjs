@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { outputSize, renderTimeline, placeAudio, finishAudio, SAMPLE_RATE } from './render-core.mjs';
 
 test('output keeps orientation and aspect with even bounded dimensions', () => {
-  assert.deepEqual(outputSize(3840, 2160), { width: 1280, height: 720 });
-  assert.deepEqual(outputSize(1080, 1920), { width: 720, height: 1280 });
+  assert.deepEqual(outputSize(3840, 2160), { width: 1920, height: 1080 });
+  assert.deepEqual(outputSize(1080, 1920), { width: 1080, height: 1920 });
   assert.deepEqual(outputSize(640, 360), { width: 640, height: 360 });
 });
 

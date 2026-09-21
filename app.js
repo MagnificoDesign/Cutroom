@@ -1,7 +1,7 @@
 import { openVault, check } from './vault.mjs?v=10';
 import { probe, sample, thumbnail } from './media.mjs?v=8';
 import { analyzeJoins } from './analyze.mjs?v=9';
-import { renderEdit } from './renderer.mjs?v=9';
+import { renderEdit } from './renderer.mjs?v=11';
 
 const $ = selector => document.querySelector(selector);
 const state = { clips: [], saved: [], analyses: new Map(), plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio' };
@@ -29,7 +29,8 @@ function clearPlan() {
   state.result = null;
   state.analyses.clear(); state.plan = null; state.screen = 'studio';
 }
-function explain(error) {
+function explain(error, stage = 'import') {
+  if (stage === 'create' && ['OperationError', 'EncodingError', 'NotSupportedError'].includes(error?.name)) return 'This browser could not finish the export. Your clips are still ready. Try a shorter edit or update your browser.';
   if (error?.name === 'QuotaExceededError') return 'There is not enough local storage. Free some space, then retry this video.';
   if (error?.name === 'OperationError') return 'This video could not be encrypted. Retry it while Cutroom stays open.';
   if (error?.name === 'NotReadableError') return 'The original video could not be read. Make sure it has finished downloading in Photos or Files.';
@@ -335,7 +336,7 @@ async function create({ keepFull = false } = {}) {
     state.message = '';
     state.screen = 'result';
   } catch (error) {
-    if (active(parent)) { clearPlan(); state.message = signal.aborted ? 'Creation cancelled. Your videos are still ready.' : explain(error); }
+    if (active(parent)) { clearPlan(); state.message = signal.aborted ? 'Creation cancelled. Your videos are still ready.' : explain(error, 'create'); }
   } finally {
     parent.removeEventListener('abort', abort);
     await wakeLock?.release().catch(() => {});
@@ -413,7 +414,7 @@ function lock() {
   render();
 }
 
-const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.10</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.11</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
 function render() {
   // A status/error rerender must not leave a detached player or join loop alive.
   stopJoinPreview(true);
@@ -433,14 +434,24 @@ function render() {
     const edits = state.plan.segments.map(part => `<li><b>${esc(byId.get(part.id).name)}</b><span>${part.start.toFixed(2)}–${part.end.toFixed(2)} sec of ${byId.get(part.id).duration.toFixed(2)}</span></li>`).join('');
     const smooth = result.smoothedJoins || [];
     const merged = state.plan.joins?.filter(join => join.kind === 'overlap').length || 0;
-    const joins = result.timeline.slice(1).map((part, index) => `<button class="join-button" data-join="${index}" aria-label="Preview join ${index + 1}"><b>${playIcon} Preview join ${index + 1}</b><span>${part.outputStart.toFixed(2)} sec · ${result.smoothedJoins?.some(join => join.index === index) ? 'Smoothed connection' : state.plan.joins?.[index]?.kind === 'overlap' ? 'Matched overlap' : 'Cut'}</span><small>${esc(byId.get(result.timeline[index].id).name)} → ${esc(byId.get(part.id).name)}</small></button>`).join('');
-    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="edit" class="secondary">Edit These Clips</button><button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : smooth.length ? 'The clip order and timing were kept.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p>${smooth.length ? `<p>${smooth.reduce((sum, join) => sum + join.frames, 0)} in-between frames were created across ${smooth.length} connection${smooth.length === 1 ? '' : 's'} to smooth small movement gaps. Sound keeps its original timing.</p>` : ''}<ol>${edits}</ol>${joins ? `<div class="join-list"><h3>Check the joins</h3><p>Play a few seconds around each connection.</p>${joins}<p id="join-status" role="status"></p></div>` : ''}<button id="full" class="secondary">Make a version with full clips</button></details></section>`;
+    const joins = result.timeline.slice(1).map((part, index) => `<button class="join-button" data-join="${index}" aria-label="Preview join ${index + 1}"><b>${playIcon} Preview join ${index + 1}</b><span>${part.outputStart.toFixed(2)} sec · ${result.smoothedJoins?.some(join => join.index === index) ? 'Smoothed connection' : state.plan.joins?.[index]?.kind === 'overlap' ? 'Matched overlap' : result.finishedJoins?.some(join => join.index === index) ? 'Matched framing / color' : 'Cut'}</span><small>${esc(byId.get(result.timeline[index].id).name)} → ${esc(byId.get(part.id).name)}</small></button>`).join('');
+    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()} · ${result.width}×${result.height}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="edit" class="secondary">Edit These Clips</button><button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : smooth.length ? 'The clip order and timing were kept.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p>${smooth.length ? `<p>${smooth.reduce((sum, join) => sum + join.frames, 0)} in-between frames were created across ${smooth.length} connection${smooth.length === 1 ? '' : 's'} to smooth small movement gaps. Sound keeps its original timing.</p>` : ''}<ol>${edits}</ol>${joins ? `<div class="join-list"><h3>Check the joins</h3><p>Play a few seconds around each connection.</p>${joins}<p id="join-status" role="status"></p></div>` : ''}<button id="full" class="secondary">Make a version with full clips</button></details></section>`;
     $('#save').onclick = saveResult;
     $('#again').onclick = () => chooseClips([], { fresh: true });
     $('#edit').onclick = editTheseClips;
     $('#full').onclick = () => create({ keepFull: true });
     app.querySelectorAll('[data-join]').forEach(button => { button.onclick = () => playJoin(Number(button.dataset.join)); });
     const review = app.querySelector('.edit-review');
+    const details = [];
+    if (result.copiedPicture) details.push('Original compressed picture was kept without another video compression pass. Sound follows the edit.');
+    else details.push(`${result.mixedCadence ? 'Original picture timing is kept across different frame rates, up to' : 'Picture cadence:'} ${Number(result.frameRate.toFixed(2))} fps${result.reduced ? '. A smaller export was used to fit this browser and edit' : ''}.`);
+    if (result.hdrConverted) details.push('HDR footage was converted to standard color with highlight roll-off for consistent playback.');
+    const aligned = result.finishedJoins?.filter(join => join.aligned).length || 0;
+    const matched = result.finishedJoins?.filter(join => join.colorMatched).length || 0;
+    if (aligned) details.push(`Tiny framing corrections at ${aligned} connection${aligned === 1 ? '' : 's'} use at most 3.5% zoom.`);
+    if (matched) details.push(`Small exposure and color differences were matched at ${matched} connection${matched === 1 ? '' : 's'}.`);
+    const qualityNote = document.createElement('p'); qualityNote.textContent = details.join(' ');
+    review.insertBefore(qualityNote, review.querySelector('ol'));
     if (merged) {
       const note = document.createElement('p');
       note.textContent = `${merged} overlapping join${merged === 1 ? '' : 's'} verified. The shared picture and sound are used once.`;

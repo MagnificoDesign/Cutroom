@@ -1,11 +1,6 @@
 export const FRAME_RATE = 30;
 export const SAMPLE_RATE = 48000;
-
-export function outputSize(width, height) {
-  if (!(width > 0 && height > 0)) throw new Error('This video has no readable picture size.');
-  const scale = Math.min(1, 1280 / Math.max(width, height));
-  return { width: Math.max(2, Math.round(width * scale / 2) * 2), height: Math.max(2, Math.round(height * scale / 2) * 2) };
-}
+export { outputSize } from './quality.mjs?v=11';
 
 export function renderTimeline(segments) {
   let sample = 0;
