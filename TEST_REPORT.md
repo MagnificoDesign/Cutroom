@@ -1,67 +1,67 @@
-# Cutroom v0.12 verification checkpoint
+# Cutroom v0.13 verification
 
-## Scope and source
+## Scope
 
-Nick selected improvements 1, 2 and 5: source-frame cut precision, checking rendered connections, and longer-export reliability. This release implements those three behind Create. The existing sound levels and seam corrections retain their prior behavior; loudness matching and whole-clip stabilization are not part of this update.
+This is a change to the editing goal, based on the owner's request to prefer one continuous-looking sequence over using all uploaded footage. Normal Create now searches a bank of alternate takes and may aggressively trim or omit clips. It keeps the local encrypted-vault architecture and the existing renderer/finishing system. The confirmed upload base is v0.12, main commit `279d1b08fb6d9b4409d424667b9789bf2a2c64d7`.
 
-The baseline is the confirmed v0.11 upload in `MagnificoDesign/Cutroom`, remote `main` at `126bea6038569661195f369bf4101d32b4a45e03`. That upload previously matched all 19 update files, the complete 44-file release, and all 28 live application/cache URLs. Remote main was merged into the local `feature/native-join-review` branch before editing. This session prepares a GitHub upload package; it does not deploy it.
-
-The handoff's local-only, encrypted storage, conservative overlap handling and simple phone flow remain in force. Nick's later authorization permits the existing brief optical-flow frames. No personal footage was used or included. The current-project-only storage policy remains: Create New Video removes imported copies; the app has no previous-upload archive.
-
-## Changes verified
-
-- **Source frame timing:** analysis reads packet presentation times, then requests actual native frames for the coarse scan, overlap checks and fine cut search. Ordinary cuts and quiet-pause candidates are snapped within their permitted native boundary range. Final clip ends stay valid. Outgoing motion prediction uses the actual final-frame interval instead of reusing an approximate 30 fps prediction for 24/25 fps footage. Verified shared-time overlap seams are not independently resnapped. The metadata scan is reused by rendering, then dropped from the UI plan.
-- **Actual rendered connection review:** after encoding, compare up to 0.45 seconds on each side of each applied enhancement against the original source sequence. Decode at a 192-pixel longest edge, inspect temporal movement, brightness/color changes, tracking disagreement and local gradient detail, and include the easing back to original footage. These checks supplement the existing output-resolution bridge/framing admission checks. On a failed or unavailable review, discard the movie and render once using original pictures at the same planned cuts. All optional join effects are disabled in that fallback; order, trims, duration and audio are preserved. Review edits explains the fallback.
-- **Bounded audio and recovery:** process at most 48,000 output samples per channel per block, with one decoded source block carried across a boundary when needed. Global sample indices preserve resampling phase; five-millisecond fades apply only at clip boundaries. Encoder and muxer scopes finish before output decoding begins. A qualifying encoder/resource failure or the export-size guard permits one retry at a supported smaller profile, at most 30 fps, with lower bitrate. The failed output is cancelled first. A second failure stops. Decryption/source-read failures and user cancellation do not enter this resource-retry path. Existing compressed-picture fallback remains separate.
+Configured limits are 500 clips / 30 input minutes / four output minutes. Four minutes is a ceiling, not a promised runtime. Imports omitted by the edit remain in the current encrypted project until Remove or Create New Video. No past-project archive is introduced. Omissions are editorial selection, not claims of duplicate recordings.
 
 ## Executed checks
 
-Environment: Node 24.19.0, Playwright 1.58.2, Linux Chromium 153.0.8010.0, ffmpeg/ffprobe; vendored MediaBunny 1.58.1. Tests use synthetic local media and real WebCodecs. No unexpected external application requests or page errors occurred in the passing runs. Blob URL reads are local media reads, not network uploads.
+Environment: Node 24.19.0, Playwright 1.58.2, Linux Chromium 153.0.8010.0, ffmpeg/ffprobe and vendored MediaBunny 1.58.1. All footage is harmless synthetic media generated locally. Browser scenarios encode VP9/Opus WebM. These results are not physical iPhone or H.264/AAC encoding verification.
 
-**84 Node tests passed** (`npm test`). This includes the 72 prior tests and 12 new cases covering native fractional/VFR neighborhoods, bounded frame scans, acoustic margin preservation, joint-planner timestamp validity, correct 24/25/50/60 fps prediction intervals, sample-for-sample stereo chunk equivalence, a three-minute bounded audio iteration, classified recovery/cancellation, acceptance of a measured improvement, rejection of flashes/ghosting/warps, missing or flat evidence, and cancellation during sequence scoring.
+**94 Node tests passed** (`npm test`). The existing vault, overlap, planner, motion, audio, export-quality and recovery cases remain. Ten new continuity cases cover:
 
-The audio equivalence test compares every Float32 sample against the prior monolithic placement/ramp behavior at 44.1 and 48 kHz, using irregular decode blocks, delayed sound and fractional trim starts. The three-minute iteration produces 180 blocks: its two output PCM arrays total **384,000 bytes per block**, instead of growing with the full clip. This figure excludes the AudioBuffer, decoder, encoded output and other app memory; it is not a measurement of total iPhone RAM usage.
+- 375 four-second clips fit the configured bank, with explicit count/duration limits.
+- A 375-clip graph selects a subset with more than 32 distinct source IDs and no repeats, respects middle-clip cuts and caps the timeline at four minutes.
+- A middle take can contribute 0.6 seconds out of four; the incoming and outgoing cuts must still agree.
+- An incoming interpolation requirement preserves enough of the middle clip for the renderer's connection window.
+- Unknown, rejected, invalid and unchecked edges cannot enter the final sequence. Cancellation stops planning.
+- Native frame timing is respected at the output ceiling and at candidate exits, including irregular millisecond timestamps with nominal decoded durations.
+- Compact banks discard decoded pixels while retaining descriptors/motion.
+- Consecutive-frame motion admission accepts natural progression and rejects opposite movement, large jumps and a small changed foreground subject.
+- Flat frames cannot generate candidate connections.
 
-**19 application browser scenarios passed** (`npm run test:browser`, Chromium):
+The bounded PCM regression now exercises **four minutes**: 240 output blocks and 11,520,000 samples per channel. The two Float32 output arrays for any one block total 384,000 bytes. This excludes decoder buffers, AudioBuffers, encoded video and other application memory; it is not total phone RAM usage.
 
-- Multi-megabyte encrypted binary imports, legacy unlock, orphan cleanup, partial quota/abort recovery, one-login picker simulation and retry of only failed imports.
-- Offline unlock → Create → play → download → lock with the v0.12 module cache; sharing receives the correctly named rendered File.
-- A trimmed/reordered export retains all 116 frames, its final picture, advancing timestamps and the expected source tones.
-- A three-clip overlap chain renders 12 input seconds into eight unique seconds, independently decoding every original frame number 0–239 exactly once and the continuous source soundtrack.
-- Cancel/lock during encoding, overlap analysis, decryption, previews and interpolation cannot restore stale plaintext UI/results.
-- Source previews, Remove/Undo, ordered selection persistence, join previews and Edit These Clips work. Create New Video works before or after saving, deletes imported/Undo copies, and remains empty after reopening. Injected deletion failure preserves the current project for retry.
-- Real decoded acoustic pauses guide cuts at 2.433 / 0.967 seconds, with the expected source sound retained.
-- A known moving seam still uses four generated frames, reduces the maximum measured movement from 1.200 to 0.800 analysis pixels, retains all 120 output slots and has byte-identical independently decoded sound versus the plain export.
-- The 390-pixel-wide UI creates/plays three 1280×720 clips with two approved smoothed joins and eight generated frames. The six-second result and full-original restoration pass. The v0.12 result/Review edits screenshot was inspected.
+**20 app browser scenarios passed** (`npm run test:browser`, Chromium), including the new source-bank flow:
 
-**16 quality browser scenarios passed** (`npm run test:quality`), including six new scenarios:
+- Import 25 real MP4 files, show the first 24 with Show more clips, and keep Create above the list.
+- Select the three compatible moving takes, omit 22 unrelated clips, render/play the six-second result and disclose Used 3 of 25 clips.
+- Keep all 25 encrypted copies accessible through Edit These Clips. Remove/Undo, lock/unlock and Create New Video still work; the last action leaves zero stored clips/chunks.
+- One-login picker simulation, sequential partial import/retry, binary multi-megabyte encryption, legacy unlock, offline Create/play/download, correctly named share File, cancellation and deletion-failure recovery pass.
+- Full-clips restoration and join preview behavior pass under the revised default. Unrelated solid-color clips produce a disclosed single-clip selection; requesting the full version includes all originals.
+- Legacy direct-engine tests still verify the eight-second overlap chain with 240 unique numbered frames, source sound, native final-frame timing and cuts in real decoded acoustic pauses.
+- The known motion-gap export uses four generated frames, lowers the measured maximum movement step from 1.200 to 0.800 analysis pixels and has byte-identical decoded audio versus the same plain edit.
+- The 390-pixel-wide app creates three 1280×720 clips with two approved bridges, plays them, and restores the six-second full-original version. Lock during interpolation cannot restore stale plaintext/result UI.
 
-1. Native analysis requests for actual 24/60/VFR inputs match source packet timestamps, including intervening 60 fps pictures. Continuous audible material stays intact. Rendering reuses the analysis metadata without rescanning it.
-2. A **32.1394-second stereo edit** from a 44.1 kHz source uses 33 AudioBuffer submissions, none longer than 48,000 samples/channel. Total sample count matches the fractional trim. Independent decoding verifies both channel frequencies, no amplitude gaps or clicks across all 31 interior one-second boundaries, and no duration drift.
-3. An injected runtime hardware-encoder failure releases the first output before retrying. The retry produces a playable 1280×720/30 result with all 15 expected frames over 0.5 seconds, and reports the reduction/recovery.
-4. Repeated encoder failures cause exactly two attempts and one retry. Cancelling between attempts returns AbortError after the first attempt and starts no second encode.
-5. Damage is introduced into one picture during actual encoding, after the normal source checks. The decoded-sequence checker detects its brightness flash, discards that enhanced movie and makes an original-frame export. Independent decoding confirms the replacement boundary picture matches the plain export, all 60 frames remain, duration is unchanged, and decoded stereo audio is identical.
-6. Cancelling during actual rendered-connection review returns no movie and starts no simpler rendering pass.
+**17 quality browser scenarios passed** (`npm run test:quality`). These retain the v0.12 checks for 1080p60 detail, mixed 24/30/60/VFR cadence, compressed-picture copying/fallback, source stereo sound, HDR mapping, framing/color improvement, bounded encoder recovery, decoded-connection review and cancellation. A new case verifies that a required continuity bridge cannot silently turn into an unmatched cut: an incompatible bridge request stops before encoding.
 
-The ten v0.11 quality scenarios also pass: 1080p60 detail/all frames/audible sound; 159/159 mixed 24/30/60/VFR frames within 1.1 ms of source timing; byte-identical compatible compressed packets and unsafe-cut re-encoding; 90.0% reduction in decoded framing/exposure seam error with identical audio; known real 10-bit PQ and HLG mapping with GPU/CPU agreement; capability fallback; compressed-copy fallback; cancellation during copying; and HDR geometry/CPU cancellation.
+**Two continuity export scenarios passed** (`npm run test:continuity`):
 
-The first review prototype incorrectly penalized a valid exposure easing as spatial disagreement. The final calculation separates measured global light change from the spatial residual while retaining an independent flash gate. Known good corrections and motion bridges pass, and injected ghosting/warping/flash cases fail. The null-output ffmpeg check now retains a microsecond encoder timebase so rounded validation timestamps do not produce false warnings; the actual output timestamps are still checked independently.
+1. **Six shuffled four-second alternate takes → one eight-second movie.** Each take contains part of the same known moving scene; all but the first have incompatible openings and all but the last have incompatible endings. The planner selects five pieces, leaves one take out and checks 26 proposed connections. It uses the first take's opening and the last take's ending. Selected intervals are 0–2.667, 1.867–2.533, 1.733–2.900, 1.300–2.800 and 2.000–4.000 seconds from takes 0, 1, 2, 4 and 5. The shortest middle portion is **0.667 seconds of a four-second take**. Independent ffmpeg decoding verifies all 240 world frames occur once, with no skipped/replayed world time. Fitting decoded pictures to the known scene geometry measures **0.600–0.600 pixel movement per frame**, including every join. The source 440 Hz tone is audible throughout. This is a controlled geometric test at 320×180, not proof of performance on arbitrary AI-generated people or scenes.
+2. **A real four-minute export** retains all **2,880 pictures** from a 12 fps source. Independent ffprobe/ffmpeg checks confirm duration and audible source tone at the beginning, middle and end. The encoder receives exactly 240 one-second audio blocks, none longer than 48,000 samples/channel. This is a four-minute output test, not a 25-minute multi-clip iPhone import test.
 
-## Limits and iPhone verification
+No unexpected external application requests or page errors occurred in the passing browser scenarios. Local blob-URL reads are not uploads. The v0.13 390-pixel result view was visually inspected: player, Used X of Y, Save / Share, Edit These Clips and Create New Video are visible, with Review edits secondary.
 
-This is a bounded heuristic over decoded previews, not a learned perceptual model or a guarantee against all artifacts. It checks applied enhancements; ordinary unrelated cuts are not forced into a morph. Uncertain benefit results in original pictures. A failed quality check can add another render pass; a resource retry can reduce picture size, bitrate and cadence. At most one simplification and one resource retry occur, in addition to the pre-existing optional compressed-copy attempt.
+## Fixes found while verifying
 
-A killed/reloaded iOS process cannot be automatically resumed. The saved current selection remains available after unlocking, subject to browser storage not being evicted. The encoded movie is still held in memory and capped at 192 MiB; this release reduces PCM staging and releases work sooner, but does not eliminate every memory/thermal constraint. The three-minute/twelve-clip limit remains.
+Starting a second render could leave the old result caption briefly in the DOM while preparing the new job. Create now replaces that screen immediately. Candidate exits use the next actual packet timestamp rather than a nominal decoded-frame duration. Middle intervals retain the renderer's minimum window when an incoming/outgoing connection depends on interpolation. Required interpolation must survive both actual rendering and the decoded-picture check; optional-effect fallback cannot strip it silently.
 
-A physical iPhone and Linux WebKit were unavailable. These executions encode VP9/Opus WebM. They do not establish exact-build iPhone H.264/AAC behavior, native Photos picker behavior, hardware resource recovery, thermal limits, or Save Video in the iOS share sheet.
+## Limits
 
-After uploading the 23 extracted files to main/root and allowing Pages to deploy, open the v0.12 release link online, close all Cutroom tabs/Home Screen instances, and reopen to confirm v0.12. Do not clear website data. Use harmless footage first:
+The planner and motion checks are bounded heuristics. They do not understand characters, story structure, jokes or the meaning of an ending. One opening/middle/ending describes the chosen sequence structure; no semantic storytelling system has been added. Related generated takes must contain sufficiently compatible actual pictures/movement. The app may return a short sequence or just one clip instead of joining incompatible footage.
 
-1. Unlock once and add three clips from Photos. Create, watch with sound and use Save / Share. Verify the saved result too.
-2. Try short 24/30/60 or variable-rate clips with related movement. Inspect each join; generated frames/corrections remain conditional. Compare with the full-clips version when useful.
-3. Try a longer edit after the short test passes. Check movement and sound near joins and throughout the saved movie. A lighter retry or original-frame fallback should be disclosed in Review edits.
-4. Cancel/lock during creation. Reopen and confirm the selected clips remain ready, with no stale movie. Remove/Undo and Create New Video should still behave normally; the new project stays empty after reopening.
+The nearest-neighbor search keeps a limited number of alternatives; dense verification checks at most 600 connections and the path search uses a bounded beam. It can miss a better route. Color/detail admission samples output-size images, not every pixel, and cannot guarantee invisible cuts. If an essential bridge cannot be rendered/validated, the export stops with the clips preserved. Default source audio follows visual trims and may cut speech; it does not synthesize missing sound or recognize sentence boundaries.
 
-## Upload artifact
+375-clip graph coverage establishes ID/range/path capacity, and 25 real-file browser coverage establishes the larger application flow. Neither establishes 375 simultaneous real-file imports or 25 minutes of footage on an iPhone. Encoded output remains in memory with a 192 MiB ceiling. Device storage, codec availability, thermal pressure and process eviction can reduce practical capacity. Long edits may use smaller export profiles. Browser storage is not guaranteed permanent storage.
 
-`Cutroom_v0.12_GitHub_Update.zip` contains **23 flat update files** for the confirmed v0.11 installation, including source, tests, documentation and `SHA256SUMS.json`. The manifest describes all **50 hashed files** in the resulting **51-file root release**; it excludes its own hash. The package is checked by applying it over the exact baseline and verifying every manifest entry and the service-worker module graph. Dependencies, generated test media, screenshots, test logs and personal videos are excluded. No build command is needed for GitHub Pages.
+A physical iPhone and Linux WebKit were unavailable. Native Photos picker return, Safari H.264/AAC export, practical large-bank phone capacity and the iOS Save Video sheet still require exact-build testing. No media was uploaded to a cloud service for these tests.
+
+## Deployment and phone check
+
+Upload all 26 extracted update files to main/root, keeping the other existing files. The complete release has 57 root files; SHA256SUMS.json records every other root file. The update archive is reconstructed against the confirmed v0.12 base and every resulting hash is checked. New runtime modules are included in the v13 service-worker cache.
+
+After Pages deploys, open the v0.13 release URL online, close every Cutroom Safari/Home Screen instance and reopen to confirm v0.13. Do not clear website data.
+
+Use harmless related takes first. Unlock once, import, Create, inspect all joins with sound, save and play the saved file. Check Used X of Y and Edit These Clips; unused takes should still be there. Create New Video should empty the current project even without saving. Once a small bank passes on the phone, increase to tens of clips before attempting a 25-minute collection.

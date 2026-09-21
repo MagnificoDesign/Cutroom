@@ -25,15 +25,15 @@ test('streamed PCM matches monolithic stereo resampling at every sample, includi
   }
 });
 
-test('a three-minute silent clip allocates only one-second output blocks and cancellation stops the next block', async () => {
+test('a four-minute silent clip allocates only one-second output blocks and cancellation stops the next block', async () => {
   let chunks = 0, samples = 0, maximum = 0;
-  for await (const { channels } of audioChunks(null, { start: 0, samples: 180 * SAMPLE_RATE })) {
+  for await (const { channels } of audioChunks(null, { start: 0, samples: 240 * SAMPLE_RATE })) {
     chunks++; samples += channels[0].length; maximum = Math.max(maximum, channels.reduce((n, c) => n + c.byteLength, 0));
   }
-  assert.equal(chunks, 180); assert.equal(samples, 8640000); assert.equal(maximum, 384000);
+  assert.equal(chunks, 240); assert.equal(samples, 11520000); assert.equal(maximum, 384000);
   const controller = new AbortController(); let yielded = 0;
   await assert.rejects(async () => {
-    for await (const chunk of audioChunks(null, { start: 0, samples: 180 * SAMPLE_RATE }, { signal: controller.signal })) { yielded++; controller.abort(); }
+    for await (const chunk of audioChunks(null, { start: 0, samples: 240 * SAMPLE_RATE }, { signal: controller.signal })) { yielded++; controller.abort(); }
   }, { name: 'AbortError' });
   assert.equal(yielded, 1);
 });

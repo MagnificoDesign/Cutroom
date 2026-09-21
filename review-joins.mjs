@@ -1,4 +1,4 @@
-import { pictures } from './transitions.mjs?v=12';
+import { pictures } from './transitions.mjs?v=13';
 import { judgeJoin } from './join-quality.mjs?v=12';
 import { outputSize } from './quality.mjs?v=11';
 import { check } from './vault.mjs?v=10';

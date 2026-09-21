@@ -45,7 +45,7 @@ export function flow(a, b) {
   return { x: x / width / dt, y: y / height / dt, confidence, local: local.length >= 2 };
 }
 
-function signature(clip, time, side) {
+export function signature(clip, time, side) {
   const frames = clip.samples || [];
   if (!frames.length) return { frame: null, vector: { x: 0, y: 0, confidence: 0 } };
   // A cut timestamp is an exclusive end: score the last displayed source frame.
@@ -118,10 +118,10 @@ function times(clip, side) {
     .map(time => cutAt(clip, time, low, high)).filter(Number.isFinite))].sort((a, b) => a - b);
 }
 
-export function validatePlan(clips, plan) {
+export function validatePlan(clips, plan, { allowSubset = false } = {}) {
   const byId = new Map(clips.map(clip => [clip.id, clip]));
   const used = new Set();
-  if (!plan.length || plan.length !== clips.length) throw new Error('The edit must include every selected video.');
+  if (!plan.length || !allowSubset && plan.length !== clips.length) throw new Error('The edit must include every selected video.');
   for (const part of plan) {
     const clip = byId.get(part.id);
     if (!clip || used.has(part.id) || !Number.isFinite(part.start) || !Number.isFinite(part.end) || part.start < 0 || part.end > clip.duration + .0001 || part.end <= part.start) throw new Error('The edit contains an invalid clip range.');

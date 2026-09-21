@@ -100,7 +100,7 @@ try {
   await run('native cut inspection requests actual 24 60 and VFR pictures and reuses timing for export', async page => {
     const result = await page.evaluate(async () => {
       const { analyzeJoins } = await import('/analyze.mjs');
-      const { inspectMedia, probe } = await import('/media.mjs?v=8');
+      const { inspectMedia, probe } = await import('/media.mjs?v=13');
       const { renderEdit } = await import('/renderer.mjs');
       const names = ['rate24.mp4', 'rate60.mp4', 'vfr.mp4'], blobs = new Map(), clips = [], requests = [];
       for (const name of names) { const blob = await (await fetch('/test-results/quality/' + name)).blob(); blobs.set(name, blob); clips.push({ id: name, name, ...await probe(blob) }); }
@@ -197,7 +197,7 @@ try {
   await run('cancelling actual rendered-connection review publishes nothing and starts no simpler render', async page => {
     const result = await page.evaluate(async () => {
       const { renderEdit } = await import('/renderer.mjs'), { CanvasSource } = await import('/mediabunny.mjs?v=6');
-      const { probe } = await import('/media.mjs?v=8');
+      const { probe } = await import('/media.mjs?v=13');
       const blobs = new Map(), clips = [], controller = new AbortController(); let rounds = 0, encoded = false;
       const add = CanvasSource.prototype.add;
       CanvasSource.prototype.add = function(...args) { if (args[0] === 0) rounds++; encoded = true; return add.apply(this, args); };
@@ -206,6 +206,23 @@ try {
       catch (error) { return { name: error.name, rounds }; }
     });
     assert.equal(result.name, 'AbortError'); assert.equal(result.rounds, 1);
+  });
+  await run('a required continuity bridge cannot silently become an unmatched cut', async page => {
+    const result = await page.evaluate(async () => {
+      const { renderEdit } = await import('/renderer.mjs');
+      const { probe } = await import('/media.mjs?v=13');
+      const { CanvasSource } = await import('/mediabunny.mjs?v=6');
+      const blobs = new Map(), clips = []; let encoded = 0;
+      const add = CanvasSource.prototype.add;
+      CanvasSource.prototype.add = function(...args) { encoded++; return add.apply(this, args); };
+      for (const name of ['finish0.mp4', 'finish1.mp4']) { const blob = await (await fetch('/test-results/quality/' + name)).blob(); blobs.set(name, blob); clips.push({ id: name, name, ...await probe(blob) }); }
+      try {
+        await renderEdit({ clips, segments: clips.map(c => ({ id: c.id, start: 0, end: 1 })),
+          plan: { continuity: true, joins: [{ a: clips[0].id, b: clips[1].id, requiresBridge: true }] }, getBlob: c => blobs.get(c.id), signal: new AbortController().signal });
+        return { returned: true, encoded };
+      } catch (error) { return { message: error.message, encoded }; }
+    });
+    assert.match(result.message, /could not be smoothed reliably/); assert.equal(result.encoded, 0);
   });
   await run('1080p60 retains measured detail, all native frames and audible sound', async page => {
     const result = await render(page, ['detail60.mp4']);

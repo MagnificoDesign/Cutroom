@@ -1,10 +1,11 @@
 import { openVault, check } from './vault.mjs?v=10';
-import { probe, thumbnail } from './media.mjs?v=8';
-import { analyzeJoins } from './analyze.mjs?v=12';
-import { renderEdit } from './renderer.mjs?v=12';
+import { probe, thumbnail } from './media.mjs?v=13';
+import { analyzeContinuity } from './continuity.mjs?v=13';
+import { checkBank, MAX_EDIT_SECONDS } from './edit-policy.mjs?v=13';
+import { renderEdit } from './renderer.mjs?v=13';
 
 const $ = selector => document.querySelector(selector);
-const state = { clips: [], saved: [], plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio' };
+const state = { clips: [], saved: [], plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio', visibleClips: 24 };
 let vault, session = new AbortController(), unlocking = false, picker = null, creating = null;
 const thumbnails = new Map();
 let thumbnailJob = null, clipPreview = null, joinPreview = null;
@@ -290,16 +291,19 @@ async function create({ keepFull = false } = {}) {
   state.busy = true;
   state.screen = 'creating';
   state.progress = 0;
+  state.message = 'Preparing your clips…';
+  render();
   let wakeLock;
   try {
     await vault.select(state.clips.map(clip => clip.id), signal);
     check(signal);
     state.saved = [...state.clips]; state.undo = null;
-    if (state.clips.length > 12) throw new Error('For this version, choose up to 12 videos for one edit.');
+    checkBank(state.clips);
+    if (keepFull && state.clips.reduce((n, c) => n + c.duration, 0) > MAX_EDIT_SECONDS + .02) throw new Error('The full clips exceed four minutes. Remove some clips to make a full-length version.');
     wakeLock = await navigator.wakeLock?.request('screen').catch(() => null);
     check(signal);
     const entries = state.clips;
-    const plan = keepFull ? { segments: entries.map(clip => ({ id: clip.id, start: 0, end: clip.duration })), improved: false, joins: [], reviewed: [] } : await analyzeJoins({
+    const plan = keepFull ? { segments: entries.map(clip => ({ id: clip.id, start: 0, end: clip.duration })), improved: false, joins: [], reviewed: [] } : await analyzeContinuity({
       clips: entries, signal, getBlob: (clip, signal) => vault.blob(clip, signal),
       onProgress: ({ stage, fraction }) => { check(signal); state.message = stage; state.progress = fraction * .48; render(); }
     });
@@ -343,7 +347,7 @@ async function chooseClips(ids, { fresh = false, message = '', undo = null } = {
     state.clips = ids.map(id => byId.get(id)).filter(Boolean);
     const keep = new Set([...ids, ...(undo?.ids || [])]);
     state.saved = state.saved.filter(clip => keep.has(clip.id));
-    if (fresh) state.failures = [];
+    if (fresh) { state.failures = []; state.visibleClips = 24; }
     state.message = message;
     state.undo = undo;
     fileInput.value = '';
@@ -394,13 +398,14 @@ function lock() {
   state.saved = [];
   state.failures = [];
   state.undo = null;
+  state.visibleClips = 24;
   state.message = '';
   state.busy = false;
   clearPlan();
   render();
 }
 
-const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.12</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.13</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
 function render() {
   // A status/error rerender must not leave a detached player or join loop alive.
   stopJoinPreview(true);
@@ -419,9 +424,11 @@ function render() {
     const byId = new Map(state.clips.map(clip => [clip.id, clip]));
     const edits = state.plan.segments.map(part => `<li><b>${esc(byId.get(part.id).name)}</b><span>${part.start.toFixed(2)}–${part.end.toFixed(2)} sec of ${byId.get(part.id).duration.toFixed(2)}</span></li>`).join('');
     const smooth = result.smoothedJoins || [];
+    const fullTooLong = state.clips.reduce((n, c) => n + c.duration, 0) > MAX_EDIT_SECONDS + .02;
+    const selectionNote = state.plan.continuity ? `Used ${state.plan.segments.length} of ${state.clips.length} clips. ${state.plan.omitted.length ? 'Unused clips remain available in Edit These Clips.' : 'Your imported clips are unchanged.'}` : '';
     const merged = state.plan.joins?.filter(join => join.kind === 'overlap').length || 0;
     const joins = result.timeline.slice(1).map((part, index) => `<button class="join-button" data-join="${index}" aria-label="Preview join ${index + 1}"><b>${playIcon} Preview join ${index + 1}</b><span>${part.outputStart.toFixed(2)} sec · ${result.smoothedJoins?.some(join => join.index === index) ? 'Smoothed connection' : state.plan.joins?.[index]?.kind === 'overlap' ? 'Matched overlap' : result.finishedJoins?.some(join => join.index === index) ? 'Matched framing / color' : 'Cut'}</span><small>${esc(byId.get(result.timeline[index].id).name)} → ${esc(byId.get(part.id).name)}</small></button>`).join('');
-    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()} · ${result.width}×${result.height}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="edit" class="secondary">Edit These Clips</button><button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : smooth.length ? 'The clip order and timing were kept.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p>${smooth.length ? `<p>${smooth.reduce((sum, join) => sum + join.frames, 0)} in-between frames were created across ${smooth.length} connection${smooth.length === 1 ? '' : 's'} to smooth small movement gaps. Sound keeps its original timing.</p>` : ''}<ol>${edits}</ol>${joins ? `<div class="join-list"><h3>Check the joins</h3><p>Play a few seconds around each connection.</p>${joins}<p id="join-status" role="status"></p></div>` : ''}<button id="full" class="secondary">Make a version with full clips</button></details></section>`;
+    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()} · ${result.width}×${result.height}</p>${selectionNote ? `<p class="selection-note">${selectionNote}</p>` : ''}<button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="edit" class="secondary">Edit These Clips</button><button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.continuity ? state.plan.segments.length > 1 ? 'One opening, connected middle sections and one ending were selected for visual continuity. Other footage was left out of this edit; it was not deleted or declared duplicate.' : 'No multi-clip sequence passed the connection checks. One clip was selected; the other takes remain available.' : state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : smooth.length ? 'The clip order and timing were kept.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p>${smooth.length ? `<p>${smooth.reduce((sum, join) => sum + join.frames, 0)} in-between frames were created across ${smooth.length} connection${smooth.length === 1 ? '' : 's'} to smooth small movement gaps. Sound keeps its original timing.</p>` : ''}<ol>${edits}</ol>${joins ? `<div class="join-list"><h3>Check the joins</h3><p>Play a few seconds around each connection.</p>${joins}<p id="join-status" role="status"></p></div>` : ''}<button id="full" class="secondary" ${fullTooLong ? 'disabled' : ''}>Make a version with full clips</button>${fullTooLong ? '<p>For a full-clips version, use Edit These Clips to choose four minutes or less.</p>' : ''}</details></section>`;
     $('#save').onclick = saveResult;
     $('#again').onclick = () => chooseClips([], { fresh: true });
     $('#edit').onclick = editTheseClips;
@@ -429,6 +436,11 @@ function render() {
     app.querySelectorAll('[data-join]').forEach(button => { button.onclick = () => playJoin(Number(button.dataset.join)); });
     const review = app.querySelector('.edit-review');
     const details = [];
+    if (state.plan.continuity) {
+      details.push('Source sound follows the selected picture cuts. This mode prioritizes visual continuity and does not recognize sentence or story boundaries.');
+      if (state.plan.failures.length) details.push(`${state.plan.failures.length} clips could not be analyzed in this browser and were left out of this edit.`);
+      if (state.plan.searchLimited) details.push('The search reached its processing limit; only checked connections were used.');
+    }
     if (result.copiedPicture) details.push('Original compressed picture was kept without another video compression pass. Sound follows the edit.');
     else details.push(`${result.mixedCadence ? 'Original picture timing is kept across different frame rates, up to' : 'Picture cadence:'} ${Number(result.frameRate.toFixed(2))} fps${result.reduced ? '. A smaller export was used to fit this browser and edit' : ''}.`);
     if (result.qualityChecks?.some(join => join.ok) && !result.simplifiedJoins?.length) details.push('Rendered connections were checked against the original picture sequences.');
@@ -452,11 +464,12 @@ function render() {
       review.insertBefore(note, review.querySelector('ol'));
     }
   } else {
-    const clips = state.clips.map((clip, index) => `<div class="clip"><button type="button" class="clip-preview" data-preview="${esc(clip.id)}" aria-label="Preview ${esc(clip.name)}" ${state.busy ? 'disabled' : ''}><span class="clip-thumb" data-thumbnail="${esc(clip.id)}">${thumbnails.get(clip.id) ? `<img src="${esc(thumbnails.get(clip.id))}" alt="">` : ''}<span class="thumb-play">${playIcon}</span><span class="num" aria-hidden="true">${index + 1}</span></span><span class="clip-info"><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></span></button><button type="button" class="clip-remove" data-remove="${esc(clip.id)}" aria-label="Remove ${esc(clip.name)} from this video" ${state.busy ? 'disabled' : ''}>Remove</button></div>`).join('');
+    const clips = state.clips.slice(0, state.visibleClips).map((clip, index) => `<div class="clip"><button type="button" class="clip-preview" data-preview="${esc(clip.id)}" aria-label="Preview ${esc(clip.name)}" ${state.busy ? 'disabled' : ''}><span class="clip-thumb" data-thumbnail="${esc(clip.id)}">${thumbnails.get(clip.id) ? `<img src="${esc(thumbnails.get(clip.id))}" alt="">` : ''}<span class="thumb-play">${playIcon}</span><span class="num" aria-hidden="true">${index + 1}</span></span><span class="clip-info"><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></span></button><button type="button" class="clip-remove" data-remove="${esc(clip.id)}" aria-label="Remove ${esc(clip.name)} from this video" ${state.busy ? 'disabled' : ''}>Remove</button></div>`).join('');
     const failures = state.failures.length ? `<div class="error" role="alert">${state.failures.map(item => `<p><b>${esc(item.file.name)}</b>: ${esc(item.reason)}</p>`).join('')}</div><button id="retry" class="secondary" ${state.busy ? 'disabled' : ''}>Retry Failed Videos</button>` : '';
-    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Your clips are encrypted on this device. Starting a new video removes these copies.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>+ Add Videos</button><div class="clips">${clips}</div>${state.message ? `<div class="status" role="status"><span>${esc(state.message)}</span>${state.undo ? `<button id="undo" class="undo" ${state.busy ? 'disabled' : ''}>Undo Remove</button>` : ''}</div>` : ''}${failures}<button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button></section>`;
+    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Add alternate takes of a scene. Cutroom will select connected sections and leave out footage that breaks the flow. Imported copies stay encrypted until you start a new video.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>+ Add Videos</button><p>${state.clips.length} clips · ${(state.clips.reduce((n, c) => n + c.duration, 0) / 60).toFixed(1)} min of source</p><button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button><div class="clips">${clips}</div>${state.clips.length > state.visibleClips ? `<button id="more" class="secondary" ${state.busy ? 'disabled' : ''}>Show more clips (${state.clips.length - state.visibleClips} remaining)</button>` : ''}${state.message ? `<div class="status" role="status"><span>${esc(state.message)}</span>${state.undo ? `<button id="undo" class="undo" ${state.busy ? 'disabled' : ''}>Undo Remove</button>` : ''}</div>` : ''}${failures}</section>`;
     $('#add').onclick = openPicker;
     $('#create').onclick = () => create();
+    if ($('#more')) $('#more').onclick = () => { state.visibleClips += 24; render(); };
     app.querySelectorAll('[data-preview]').forEach(button => { button.onclick = () => openClipPreview(button.dataset.preview); });
     app.querySelectorAll('[data-remove]').forEach(button => {
       button.onclick = () => chooseClips(state.clips.filter(clip => clip.id !== button.dataset.remove).map(clip => clip.id), {
@@ -489,7 +502,7 @@ window.addEventListener('pagehide', lock);
 
 (async () => {
   vault = await openVault();
-  navigator.serviceWorker?.register('./sw.js?v=10', { updateViaCache: 'none' }).catch(() => {});
+  navigator.serviceWorker?.register('./sw.js?v=13', { updateViaCache: 'none' }).catch(() => {});
   render();
 })().catch(() => {
   $('#app').innerHTML = '<div class="error" role="alert">Cutroom could not open local storage. Reopen it in Safari and try again.</div>';

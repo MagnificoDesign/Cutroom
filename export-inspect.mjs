@@ -1,5 +1,5 @@
 import { Input, ALL_FORMATS, BlobSource, EncodedPacketSink, VideoSampleSink } from './mediabunny.mjs?v=6';
-import { guarded } from './media.mjs?v=8';
+import { guarded } from './media.mjs?v=13';
 import { check } from './vault.mjs?v=10';
 import { resolveColor } from './color.mjs?v=11';
 import { cadence, isHdr } from './quality.mjs?v=11';

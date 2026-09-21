@@ -6,7 +6,7 @@ const WIDTH = 96, HEIGHT = 54;
 
 // Smoothly interpolate the measured motion field, keeping separate forward and
 // backward maps. Endpoint warps are checked before any generated frame is used.
-function grid(field) {
+export function motionGrid(field) {
   const width = 25, height = 15, x = new Float32Array(width * height), y = new Float32Array(width * height);
   for (let gy = 0; gy < height; gy++) for (let gx = 0; gx < width; gx++) {
     const px = gx / (width - 1) * (WIDTH - 1), py = gy / (height - 1) * (HEIGHT - 1);
@@ -174,7 +174,7 @@ export async function chooseBridge(a, b, signal) {
     // curve matches the incoming/outgoing speeds instead of starting abruptly.
     if (m0 < .72 || m0 > 1.3 || m1 < .72 || m1 > 1.3 || distance > 8) continue;
     const bridge = { left: half, right: half, start: aa.outputTime, end: bb.outputTime, m0, m1,
-      forward: grid(f), backward: grid(back), jump, confidence: Math.min(f.confidence, back.confidence) };
+      forward: motionGrid(f), backward: motionGrid(back), jump, confidence: Math.min(f.confidence, back.confidence) };
     const error = alignedError(bridge, aa.image, bb.image);
     if (error.mean > .018 || error.local > .05 || error.bad > .012 || error.patch > .10) continue;
     let acceptable = true;

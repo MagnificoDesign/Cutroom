@@ -4,12 +4,13 @@ import {
   canEncodeVideo, canEncodeAudio
 } from './mediabunny.mjs?v=6';
 import { check } from './vault.mjs?v=10';
-import { validatePlan } from './planner.mjs?v=12';
+import { MAX_EDIT_SECONDS } from './edit-policy.mjs?v=13';
+import { validatePlan } from './planner.mjs?v=13';
 import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=12';
 import { audioChunks } from './render-core.mjs?v=12';
-import { guarded } from './media.mjs?v=8';
-import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=12';
-import { interpolateFrame } from './transition-core.mjs?v=9';
+import { guarded } from './media.mjs?v=13';
+import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=13';
+import { interpolateFrame } from './transition-core.mjs?v=13';
 import { inspectSources } from './export-inspect.mjs?v=11';
 import { outputProfiles, videoBitrate, frameSlots, MAX_EXPORT_BYTES } from './quality.mjs?v=11';
 import { createPainter } from './color-gpu.mjs?v=11';
@@ -193,6 +194,7 @@ async function renderAttempt({ ordered, infos, timeline, total, size, format, jo
 async function verifiedAttempt(options) {
   const { expectedSound, ...result } = await renderAttempt(options);
   check(options.signal);
+  if (options.requiredBridges?.some(index => !result.smoothedJoins.some(join => join.index === index))) throw new Error('A selected connection could not be smoothed reliably. Your clips are still ready; try removing one of the similar takes.');
   options.onProgress({ stage: 'Checking picture and audio…', fraction: .97 });
   const verified = await verifyExport(result.blob, options.total, expectedSound, options.signal, options.timeline);
   check(options.signal);
@@ -200,10 +202,11 @@ async function verifiedAttempt(options) {
 }
 
 export async function renderEdit({ clips, segments, plan, getBlob, signal, onProgress = () => {} }) {
-  validatePlan(clips, segments);
+  validatePlan(clips, segments, { allowSubset: !!plan?.continuity });
   const timeline = renderTimeline(segments), total = timeline.reduce((sum, part) => sum + part.duration, 0);
-  if (total > 180) throw new Error('For this version, keep each finished edit under three minutes.');
+  if (total > MAX_EDIT_SECONDS + .02) throw new Error('Keep the finished edit to four minutes or less.');
   const byId = new Map(clips.map(clip => [clip.id, clip])), ordered = timeline.map(part => byId.get(part.id));
+  const requiredBridges = plan?.continuity ? timeline.slice(1).flatMap((part, index) => plan.joins?.some(join => join.a === timeline[index].id && join.b === part.id && join.requiresBridge) ? [index] : []) : [];
   check(signal); onProgress({ stage: 'Preparing your video…', fraction: 0 });
   const cached = new Map((plan?.sourceInfos || []).map(info => [info.id, info]));
   const infos = ordered.every(clip => cached.has(clip.id)) ? ordered.map(clip => cached.get(clip.id)) : await inspectSources(ordered, getBlob, signal, onProgress);
@@ -215,16 +218,17 @@ export async function renderEdit({ clips, segments, plan, getBlob, signal, onPro
     const joins = [];
     for (let index = 0; index < timeline.length - 1; index++) {
       check(signal);
-      if (simple || !canSmoothJoin(clips, timeline, index, plan)) { joins.push(null); continue; }
+      if (simple && !requiredBridges.includes(index) || !canSmoothJoin(clips, timeline, index, plan)) { joins.push(null); continue; }
       onProgress({ stage: `Checking connection ${index + 1} of ${timeline.length - 1}…`, fraction: 0 });
       joins.push(await inspectJoin({ clipA: ordered[index], clipB: ordered[index + 1], partA: timeline[index], partB: timeline[index + 1], size: profile, getBlob, signal }));
     }
+    if (requiredBridges.some(index => joins[index]?.kind !== 'bridge')) throw new Error('A selected connection could not be smoothed reliably. Your clips are still ready; try removing one of the similar takes.');
     return joins;
   };
   // A copy-only browser can still use the original dimensions for join checks.
   let joins = await prepare(size || profiles[0] || { width: infos[0].width, height: infos[0].height, frameRate: 60 });
   const copy = await copyPlan(infos, timeline, joins, signal);
-  const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress };
+  const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress, requiredBridges };
   if (copy) {
     try {
       return await verifiedAttempt({ ...parameters, joins, copy, format: copy.format, size: { width: copy.width, height: copy.height } });
@@ -253,12 +257,13 @@ export async function renderEdit({ clips, segments, plan, getBlob, signal, onPro
     const checked = await reviewJoins({ result, ordered, getBlob, signal, onProgress });
     qualityChecks = qualityChecks.concat(checked);
     const rejected = checked.filter(join => !join.ok);
+    if (rejected.some(join => requiredBridges.includes(join.index))) throw new Error('A smoothed connection did not pass the finished-picture check. Your clips are still ready; try removing one of the similar takes.');
     if (rejected.length && !simplified) {
       // Retry once with original pictures at the same chosen cuts. Removing all
       // optional effects prevents a second enhancement/review loop, and never
       // changes footage selection, duration, order or sound.
-      simplified = true; simplifiedJoins = joins.flatMap((join, index) => join ? [{ index, reason: rejected.find(item => item.index === index)?.reason || 'simpler-export' }] : []);
-      result.blob = null; result = null; joins = timeline.slice(1).map(() => null);
+      simplified = true; simplifiedJoins = joins.flatMap((join, index) => join && !requiredBridges.includes(index) ? [{ index, reason: rejected.find(item => item.index === index)?.reason || 'simpler-export' }] : []);
+      result.blob = null; result = null; joins = joins.map((join, index) => requiredBridges.includes(index) ? join : null);
       onProgress({ stage: 'Using cleaner original-frame connections…', fraction: 0 });
       await new Promise(resolve => setTimeout(resolve, 0));
       continue;

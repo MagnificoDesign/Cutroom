@@ -16,6 +16,13 @@ export function guarded(promise, signal, message = 'This video took too long to 
 export function describePixels(pixels, time, timestamp = time, duration = 0) {
   const frame = descriptor(pixels, 96, 54, time);
   frame.timestamp = timestamp; frame.duration = duration;
+  // Six spatial red/blue chroma averages distinguish equally bright colors.
+  frame.chroma = new Float32Array(12);
+  for (let y = 0; y < 54; y++) for (let x = 0; x < 96; x++) {
+    const at = (y * 96 + x) * 4, tile = Math.floor(y / 27) * 3 + Math.floor(x / 32);
+    frame.chroma[tile * 2] += (pixels[at] - pixels[at + 1]) / (255 * 32 * 27);
+    frame.chroma[tile * 2 + 1] += (pixels[at + 2] - pixels[at + 1]) / (255 * 32 * 27);
+  }
   frame.pixels = new Uint8Array(96 * 54);
   for (let i = 0; i < frame.pixels.length; i++) frame.pixels[i] = Math.round(pixels[i * 4] * .2126 + pixels[i * 4 + 1] * .7152 + pixels[i * 4 + 2] * .0722);
   frame.gray = new Float32Array(32 * 18);

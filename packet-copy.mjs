@@ -1,6 +1,6 @@
 import { EncodedPacketSink, canEncodeAudio } from './mediabunny.mjs?v=6';
 import { check } from './vault.mjs?v=10';
-import { guarded } from './media.mjs?v=8';
+import { guarded } from './media.mjs?v=13';
 import { sameConfig, copyRange, MAX_EXPORT_BYTES } from './quality.mjs?v=11';
 
 // A complete edit may copy compressed pictures when every boundary is safe and

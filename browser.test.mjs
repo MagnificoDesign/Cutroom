@@ -552,6 +552,10 @@ try {
       assert.deepEqual(await page.locator('.clip b').allTextContents(), ['red.mp4', 'lime.mp4', 'blue.mp4']);
       await page.locator('#create').click();
       await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
+      await page.locator('.edit-review summary').click();
+      assert.match(await page.locator('.selection-note').innerText(), /Used 1 of 3/);
+      await page.locator('#full').click();
+      await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
       const resultUrl = await page.locator('#finished').getAttribute('src');
       await page.locator('.edit-review summary').click();
       assert.equal(await page.locator('.join-button').count(), 2);
@@ -571,7 +575,8 @@ try {
       await page.locator('#undo').waitFor();
       await page.locator('#create').click();
       await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
-      assert.deepEqual((await page.locator('.edit-review li b').allTextContents()).sort(), ['blue.mp4', 'red.mp4']);
+      assert.match(await page.locator('.selection-note').innerText(), /Used 1 of 2/);
+      assert.equal(await page.locator('.edit-review li b').count(), 1);
       assert.equal((await storedCopies(page)).clips, 2); // Removed lime is no longer retained for Undo.
       await page.locator('#again').click();
       await page.getByText('Add your videos.', { exact: true }).waitFor();
@@ -581,11 +586,39 @@ try {
       await page.screenshot({ path: resolve(output, `${name}-v010-new-video.png`), fullPage: true });
     });
 
+    await run('large source bank selects a continuous subset and retains unused encrypted takes', async page => {
+      await page.goto(base); await unlock(page);
+      const files = Array.from({ length: 22 }, (_, i) => ({ name: `unused-${i}.mp4`, mimeType: 'video/mp4', buffer: fixtureBytes.get('red.mp4') }));
+      for (const id of ['pan-a', 'pan-b', 'pan-c']) files.push({ name: `${id}.mp4`, mimeType: 'video/mp4', buffer: fixtureBytes.get(`${id}.mp4`) });
+      await choose(page, files);
+      await page.getByText('25 videos ready.', { exact: true }).waitFor({ timeout: 90000 });
+      assert.equal(await page.locator('.clip').count(), 24);
+      assert(await page.locator('#create').evaluate(button => button.getBoundingClientRect().top < document.querySelector('.clips').getBoundingClientRect().top));
+      await page.locator('#more').click();
+      assert.equal(await page.locator('.clip').count(), 25);
+      await page.locator('#create').click();
+      await page.locator('#finished').waitFor({ timeout: 180000 });
+      assert.match(await page.locator('.selection-note').innerText(), /Used 3 of 25/);
+      assert.deepEqual(await page.locator('.edit-review li b').allTextContents(), ['pan-a.mp4', 'pan-b.mp4', 'pan-c.mp4']);
+      assert.equal((await storedCopies(page)).clips, 25);
+      await page.screenshot({ path: resolve(output, `${name}-v013-selection.png`), fullPage: true });
+      await page.locator('#edit').click();
+      assert.equal(await page.locator('.clip').count(), 25);
+      await page.getByRole('button', { name: 'Remove unused-0.mp4 from this video', exact: true }).click();
+      await page.locator('#undo').waitFor(); await page.locator('#undo').click();
+      await page.getByText('Video restored.', { exact: true }).waitFor();
+      await page.locator('#lock').click(); await unlock(page);
+      assert.equal((await storedCopies(page)).clips, 25);
+      await page.locator('#new').click();
+      await page.getByText('Add your videos.', { exact: true }).waitFor();
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
+    });
+
     await run('old import archives are deleted on upgrade and removed clips do not survive locking', async page => {
       await page.goto(base + '/harness');
       await page.evaluate(async password => {
         const { openVault, seal, CHUNK_SIZE } = await import('/vault.mjs?v=10');
-        const { probe } = await import('/media.mjs?v=8');
+        const { probe } = await import('/media.mjs?v=13');
         const vault = await openVault();
         await vault.unlock(password);
         const blob = await (await fetch('/test-results/harmless.mp4')).blob();

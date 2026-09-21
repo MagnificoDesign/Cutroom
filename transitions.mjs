@@ -1,7 +1,7 @@
 import { Input, ALL_FORMATS, BlobSource, VideoSampleSink } from './mediabunny.mjs?v=6';
-import { guarded, describePixels } from './media.mjs?v=8';
+import { guarded, describePixels } from './media.mjs?v=13';
 import { check } from './vault.mjs?v=6';
-import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=9';
+import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=13';
 import { FRAME_RATE } from './render-core.mjs?v=12';
 import { createPainter } from './color-gpu.mjs?v=11';
 import { chooseFinishing, validateFinishing } from './finish-core.mjs?v=11';
@@ -36,7 +36,7 @@ export async function pictures(blob, requests, size, signal, small) {
           await painter.paint(sample, signal, color); check(signal);
           const image = canvas.getContext('2d').getImageData(0, 0, size.width, size.height);
           const frame = small ? describePixels(image.data, request.time, sample.timestamp, sample.duration) : {};
-          result.push({ ...frame, image, outputTime: request.outputTime, sourceTime: request.time });
+          result.push({ ...frame, timestamp: sample.timestamp, duration: sample.duration, image, outputTime: request.outputTime, sourceTime: request.time });
         } finally { sample.close(); }
       }
     } finally { await guarded(stream.return(), signal); }
