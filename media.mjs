@@ -67,7 +67,14 @@ export function sample(blob, signal) {
       }
       check(signal);
       context.drawImage(video, 0, 0, 96, 54);
-      out.push(descriptor(context.getImageData(0, 0, 96, 54).data, 96, 54, time));
+      const pixels = context.getImageData(0, 0, 96, 54).data;
+      const frame = descriptor(pixels, 96, 54, time);
+      frame.gray = new Float32Array(32 * 18);
+      for (let y = 0; y < 18; y++) for (let x = 0; x < 32; x++) {
+        const at = ((y * 3 + 1) * 96 + x * 3 + 1) * 4;
+        frame.gray[y * 32 + x] = (pixels[at] * .2126 + pixels[at + 1] * .7152 + pixels[at + 2] * .0722) / 255;
+      }
+      out.push(frame);
     }
     return out;
   });
