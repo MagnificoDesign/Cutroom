@@ -1,0 +1,17 @@
+{
+  "name": "cutroom-independent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test core.test.mjs vault.test.mjs storage.test.mjs planner.test.mjs render-core.test.mjs",
+    "test:browser": "node browser.test.mjs"
+  },
+  "devDependencies": {
+    "@sparticuz/chromium": "153.0.0",
+    "fake-indexeddb": "6.2.4",
+    "playwright": "1.58.2"
+  },
+  "dependencies": {
+    "mediabunny": "1.58.1"
+  }
+}
