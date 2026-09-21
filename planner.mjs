@@ -1,6 +1,8 @@
 import { clamp, frameSimilarity, motion } from './core.mjs?v=6';
-import { soundAllowsCut, pauseCandidates } from './audio-cuts.mjs?v=8';
+import { soundAllowsCut, pauseCandidates } from './audio-cuts.mjs?v=12';
 import { predictPicture } from './motion.mjs?v=9';
+
+import { cutAt } from './cut-timing.mjs?v=12';
 
 const minimumKeep = clip => Math.min(clip.duration, Math.max(.5, clip.duration * .45));
 const closest = (frames, time) => frames.reduce((best, frame) => Math.abs(frame.t - time) < Math.abs(best.t - time) ? frame : best, frames[0]);
@@ -48,7 +50,7 @@ function signature(clip, time, side) {
   if (!frames.length) return { frame: null, vector: { x: 0, y: 0, confidence: 0 } };
   // A cut timestamp is an exclusive end: score the last displayed source frame.
   const before = side === 'out' ? frames.filter(f => f.duration > 0 && f.timestamp < time - .00001).at(-1) : null;
-  const frame = before && time - before.timestamp < .08 ? before : closest(frames, Math.min(time, clip.duration));
+  const frame = before && time - before.timestamp < Math.max(.08, before.duration + .002) ? before : closest(frames, Math.min(time, clip.duration));
   let window = frames.filter(f => side === 'out' ? f.t <= time + .001 && f.t >= time - .65 : f.t >= time - .001 && f.t <= time + .65);
   if (window.length < 2) window = frames.slice(Math.max(0, frames.indexOf(frame) - 1), frames.indexOf(frame) + 2);
   let vector = flow(window[0], window.at(-1));
@@ -59,8 +61,8 @@ function signature(clip, time, side) {
     vector.x = fallback.dx / Math.max(.01, (window.at(-1)?.t || 0) - (window[0]?.t || 0));
     vector.confidence = fallback.confidence;
   }
-  const gap = Math.max(.012, time - (frame.timestamp ?? frame.t));
-  const prediction = side === 'out' ? Math.abs(gap - 1 / 30) < .009 ? frame.nextPicture || predictPicture(frame, frame.inField, gap) : predictPicture(frame, frame.inField, gap) : null;
+  const gap = Math.max(.000001, time - (frame.timestamp ?? frame.t));
+  const prediction = side === 'out' ? Math.abs(gap - 1 / 30) < .000001 ? frame.nextPicture || predictPicture(frame, frame.inField, gap) : predictPicture(frame, frame.inField, gap) : null;
   return { frame, vector, prediction };
 }
 
@@ -111,7 +113,9 @@ function times(clip, side) {
   }
   all.sort((a, b) => a - b);
   const coarse = all.length <= 16 ? all : Array.from(new Set(Array.from({ length: 16 }, (_, i) => all[Math.round(i * (all.length - 1) / 15)])));
-  return [...new Set([...coarse, ...pauseCandidates(clip, side), ...(side === 'in' ? clip.fineIn || [] : clip.fineOut || [])])].sort((a, b) => a - b);
+  const low = side === 'out' ? keep : 0, high = side === 'in' ? clip.duration - keep : clip.duration;
+  return [...new Set([...coarse, ...pauseCandidates(clip, side), ...(side === 'in' ? clip.fineIn || [] : clip.fineOut || [])]
+    .map(time => cutAt(clip, time, low, high)).filter(Number.isFinite))].sort((a, b) => a - b);
 }
 
 export function validatePlan(clips, plan) {

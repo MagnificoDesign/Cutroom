@@ -1,3 +1,5 @@
+import { cutAt } from './cut-timing.mjs?v=12';
+
 // Acoustic pauses, not speech recognition. A low-energy instant is insufficient:
 // require quiet on both sides of an interior cut and never infer silence from
 // an uninspected interval or an audio decoder failure.
@@ -62,7 +64,7 @@ export function pauseCandidates(clip, side) {
     const low = Math.max(start + MARGIN, side === 'out' ? keep : .04);
     const high = Math.min(end - MARGIN, side === 'in' ? clip.duration - keep : clip.duration - .04);
     if (high < low) continue;
-    const point = Math.round((low + high) / 2 * 30) / 30;
+    const point = cutAt(clip, (low + high) / 2, low, high);
     if (point >= low - 1e-6 && point <= high + 1e-6 && soundAllowsCut(clip, point, side)) points.push(point);
   }
   const unique = [...new Set(points)].sort((a, b) => a - b);

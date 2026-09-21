@@ -127,6 +127,7 @@ test('a repeating action with two valid timeline alignments remains intact', asy
   const loop = Array.from({ length: 60 }, (_, i) => frame(i / 30, i % 30 / 30));
   const clips = ['a', 'b'].map(id => ({ id, duration: 2, width: 96, height: 54, samples: loop.filter((_, i) => i % 3 === 0) }));
   const plan = await analyzeJoins({ clips, getBlob: clip => clip.id,
+    readSources: async () => clips.map(clip => ({ id: clip.id, packets: loop.map(frame => ({ timestamp: frame.t, duration: 1 / 30 })) })),
     inspect: async (_, times) => ({ frames: times.map(time => ({ ...loop[Math.min(59, Math.floor(time * 30 + .0001))], t: time })), audio: quiet() }) });
   assert(plan.reviewed.length > 0);
   assert.equal(plan.joins.filter(join => join.kind === 'overlap').length, 0);

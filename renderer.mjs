@@ -4,11 +4,11 @@ import {
   canEncodeVideo, canEncodeAudio
 } from './mediabunny.mjs?v=6';
 import { check } from './vault.mjs?v=10';
-import { validatePlan } from './planner.mjs?v=9';
-import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=11';
-import { placeAudio, finishAudio } from './render-core.mjs?v=11';
+import { validatePlan } from './planner.mjs?v=12';
+import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=12';
+import { audioChunks } from './render-core.mjs?v=12';
 import { guarded } from './media.mjs?v=8';
-import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=11';
+import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=12';
 import { interpolateFrame } from './transition-core.mjs?v=9';
 import { inspectSources } from './export-inspect.mjs?v=11';
 import { outputProfiles, videoBitrate, frameSlots, MAX_EXPORT_BYTES } from './quality.mjs?v=11';
@@ -16,6 +16,9 @@ import { createPainter } from './color-gpu.mjs?v=11';
 import { applyColor } from './color.mjs?v=11';
 import { finishingAt, drawFinishing } from './finish-core.mjs?v=11';
 import { copyPlan, copyPictures } from './packet-copy.mjs?v=11';
+
+import { reviewJoins } from './review-joins.mjs?v=12';
+import { encodingStep, ExportResourceError, saferProfile } from './export-recovery.mjs?v=12';
 
 export async function selectFormat(size) {
   if (typeof VideoEncoder === 'undefined' || typeof AudioEncoder === 'undefined') return null;
@@ -25,7 +28,7 @@ export async function selectFormat(size) {
     { video: 'vp9', audio: 'opus', mime: 'video/webm', extension: 'webm' },
     { video: 'vp8', audio: 'opus', mime: 'video/webm', extension: 'webm' }
   ]) {
-    const bitrate = videoBitrate(size, size.frameRate || 30, candidate.video);
+    const bitrate = Math.round(Math.min(size.bitrateCap || Infinity, videoBitrate(size, size.frameRate || 30, candidate.video)));
     const video = { width: size.width, height: size.height, frameRate: size.frameRate || 30, bitrate, latencyMode: 'quality' };
     if (await canEncodeVideo(candidate.video, video) && await canEncodeAudio(candidate.audio, audio)) return { ...candidate, bitrate };
   }
@@ -86,7 +89,7 @@ async function renderAttempt({ ordered, infos, timeline, total, size, format, jo
   let bytes = 0;
   // Encoder output callbacks must not throw: route a size limit through the
   // same guarded cancellation path as Lock/Cancel, including delayed packets.
-  const budget = count => { bytes += count; if (bytes > MAX_EXPORT_BYTES * .96) job.abort(new Error('This edit is too large for a safe phone export. Try fewer or shorter clips.')); };
+  const budget = count => { bytes += count; if (bytes > MAX_EXPORT_BYTES * .96) job.abort(new ExportResourceError(new Error('The export exceeded its memory budget.'))); };
   const videoSource = copy ? new EncodedVideoPacketSource(format.video) : new CanvasSource(canvas, {
     codec: format.video, quality: new Quality({ bitrate: format.bitrate, bitrateMode: 'variable' }), keyFrameInterval: 2, latencyMode: 'quality',
     // Give the encoder its true maximum cadence without the muxer's fixed-rate
@@ -103,7 +106,7 @@ async function renderAttempt({ ordered, infos, timeline, total, size, format, jo
   parentSignal?.addEventListener('abort', parentAbort, { once: true });
   if (parentSignal?.aborted) parentAbort();
   try {
-    check(signal); await guarded(output.start(), signal);
+    check(signal); await encodingStep(() => output.start(), signal);
     for (let index = 0; index < timeline.length; index++) {
       check(signal);
       const part = timeline[index], clip = ordered[index], info = infos[index];
@@ -148,36 +151,32 @@ async function renderAttempt({ ordered, infos, timeline, total, size, format, jo
               else context.drawImage(working, 0, 0);
             }
             if (incoming && slot.time >= incoming.end - .00001) incoming = null;
-            await guarded(videoSource.add(slot.time, slot.duration, { keyFrame: frame === 0 }), signal);
+            await encodingStep(() => videoSource.add(slot.time, slot.duration, { keyFrame: frame === 0 }), signal);
             if (!(frame % 12)) { progress(slot.start); await new Promise(resolve => setTimeout(resolve, 0)); }
           }
         } finally { await guarded(stream.return(), signal); }
       }
-      const channels = [new Float32Array(part.samples), new Float32Array(part.samples)];
-      if (audio) {
-        withAudio++;
-        const buffers = new AudioBufferSink(audio).buffers(part.start - .25, part.end);
-        try {
-          while (true) {
-            const next = await guarded(buffers.next(), signal); if (next.done) break;
-            check(signal); placeAudio(channels, next.value, part.start);
-          }
-        } finally { await guarded(buffers.return(), signal); }
-      }
-      sourcePeak = Math.max(sourcePeak, finishAudio(channels, { fadeIn: index > 0, fadeOut: index < timeline.length - 1 }));
-      const buffer = new AudioBuffer({ numberOfChannels: 2, length: channels[0].length, sampleRate: SAMPLE_RATE });
-      for (let c = 0; c < 2; c++) buffer.copyToChannel(channels[c], c);
-      await guarded(audioSource.add(buffer), signal);
+      if (audio) withAudio++;
+      const buffers = audio ? new AudioBufferSink(audio).buffers(part.start - .25, part.end) : null;
+      try {
+        const read = buffers ? () => guarded(buffers.next(), signal) : null;
+        for await (const chunk of audioChunks(read, part, { signal, fadeIn: index > 0, fadeOut: index < timeline.length - 1 })) {
+          check(signal);
+          sourcePeak = Math.max(sourcePeak, chunk.peak);
+          const buffer = new AudioBuffer({ numberOfChannels: 2, length: chunk.channels[0].length, sampleRate: SAMPLE_RATE });
+          for (let c = 0; c < 2; c++) buffer.copyToChannel(chunk.channels[c], c);
+          await encodingStep(() => audioSource.add(buffer), signal);
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      } finally { if (buffers) await guarded(buffers.return(), signal); }
       currentInput.dispose(); currentInput = null;
       incoming = outgoing; outgoing = null;
     }
     check(signal); onProgress({ stage: 'Finishing your video…', fraction: .93 });
-    await guarded(output.finalize(), signal); completed = true; check(signal);
+    await encodingStep(() => output.finalize(), signal); completed = true; check(signal);
     const blob = new Blob([output.target.buffer], { type: format.mime });
-    if (blob.size > MAX_EXPORT_BYTES) throw new Error('This edit is too large for a safe phone export. Try fewer or shorter clips.');
-    onProgress({ stage: 'Checking picture and audio…', fraction: .97 });
-    const verified = await verifyExport(blob, total, sourcePeak > .001, signal, timeline); check(signal);
-    return { blob, extension: format.extension, width: size.width, height: size.height, duration: verified.duration, withAudio, timeline, smoothedJoins, finishedJoins,
+    if (blob.size > MAX_EXPORT_BYTES) throw new ExportResourceError(new Error('The export exceeded its memory budget.'));
+    return { blob, extension: format.extension, width: size.width, height: size.height, duration: total, withAudio, timeline, smoothedJoins, finishedJoins, expectedSound: sourcePeak > .001,
       videoCodec: format.video, audioCodec: format.audio, copiedPicture: !!copy, reduced: !copy && size.reduced,
       hdrConverted: hdrClips.size, frameRate: Math.min(copy ? 60 : size.frameRate, Math.max(...infos.map(info => info.rate))),
       mixedCadence: infos.some(info => info.variable || Math.abs(info.rate - infos[0].rate) > .01) };
@@ -189,35 +188,82 @@ async function renderAttempt({ ordered, infos, timeline, total, size, format, jo
   }
 }
 
+// Leave the encoder/muxer scope before decoding the finished movie, so its
+// packet lists, writer buffers and canvases can be released before verification.
+async function verifiedAttempt(options) {
+  const { expectedSound, ...result } = await renderAttempt(options);
+  check(options.signal);
+  options.onProgress({ stage: 'Checking picture and audio…', fraction: .97 });
+  const verified = await verifyExport(result.blob, options.total, expectedSound, options.signal, options.timeline);
+  check(options.signal);
+  return { ...result, duration: verified.duration };
+}
+
 export async function renderEdit({ clips, segments, plan, getBlob, signal, onProgress = () => {} }) {
   validatePlan(clips, segments);
   const timeline = renderTimeline(segments), total = timeline.reduce((sum, part) => sum + part.duration, 0);
   if (total > 180) throw new Error('For this version, keep each finished edit under three minutes.');
   const byId = new Map(clips.map(clip => [clip.id, clip])), ordered = timeline.map(part => byId.get(part.id));
   check(signal); onProgress({ stage: 'Preparing your video…', fraction: 0 });
-  const infos = await inspectSources(ordered, getBlob, signal, onProgress);
+  const cached = new Map((plan?.sourceInfos || []).map(info => [info.id, info]));
+  const infos = ordered.every(clip => cached.has(clip.id)) ? ordered.map(clip => cached.get(clip.id)) : await inspectSources(ordered, getBlob, signal, onProgress);
   const profiles = outputProfiles(infos, total);
   let size, format;
   for (const profile of profiles) { format = await guarded(selectFormat(profile), signal); if (format) { size = profile; break; } }
-  // Inspect joins using the actual output cadence and dimensions. A copy-only
-  // browser can still use the first source's dimensions for these checks.
-  const inspectionSize = size || profiles[0] || { width: infos[0].width, height: infos[0].height, frameRate: 60 };
-  timeline.forEach((part, index) => { part.slots = frameSlots(infos[index].packets, part, inspectionSize.frameRate); part.frames = part.slots.length; });
-  const joins = [];
-  for (let index = 0; index < timeline.length - 1; index++) {
-    check(signal);
-    if (!canSmoothJoin(clips, timeline, index, plan)) { joins.push(null); continue; }
-    onProgress({ stage: `Checking connection ${index + 1} of ${timeline.length - 1}…`, fraction: 0 });
-    joins.push(await inspectJoin({ clipA: ordered[index], clipB: ordered[index + 1], partA: timeline[index], partB: timeline[index + 1], size: inspectionSize, getBlob, signal }));
-  }
+  const prepare = async (profile, simple = false) => {
+    timeline.forEach((part, index) => { part.slots = frameSlots(infos[index].packets, part, profile.frameRate); part.frames = part.slots.length; });
+    const joins = [];
+    for (let index = 0; index < timeline.length - 1; index++) {
+      check(signal);
+      if (simple || !canSmoothJoin(clips, timeline, index, plan)) { joins.push(null); continue; }
+      onProgress({ stage: `Checking connection ${index + 1} of ${timeline.length - 1}…`, fraction: 0 });
+      joins.push(await inspectJoin({ clipA: ordered[index], clipB: ordered[index + 1], partA: timeline[index], partB: timeline[index + 1], size: profile, getBlob, signal }));
+    }
+    return joins;
+  };
+  // A copy-only browser can still use the original dimensions for join checks.
+  let joins = await prepare(size || profiles[0] || { width: infos[0].width, height: infos[0].height, frameRate: 60 });
   const copy = await copyPlan(infos, timeline, joins, signal);
-  const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress, joins };
+  const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress };
   if (copy) {
     try {
-      return await renderAttempt({ ...parameters, copy, format: copy.format, size: { width: copy.width, height: copy.height } });
+      return await verifiedAttempt({ ...parameters, joins, copy, format: copy.format, size: { width: copy.width, height: copy.height } });
     } catch (error) { check(signal); if (!format) throw error; }
     onProgress({ stage: 'Preparing a compatible export…', fraction: 0 });
   }
   if (!format) throw new Error('Your browser cannot create this video with sound locally. Update Safari or Chrome and try again. On iPhone, local export requires iOS 26 or later.');
-  return renderAttempt({ ...parameters, size, format });
+  let recovered = false, simplified = false, qualityChecks = [], simplifiedJoins = [];
+  while (true) {
+    check(signal);
+    let result;
+    try { result = await verifiedAttempt({ ...parameters, size, format, joins }); }
+    catch (error) {
+      check(signal);
+      if (!(error instanceof ExportResourceError) || recovered) throw error;
+      const safer = saferProfile({ ...size, bitrate: format.bitrate });
+      const supported = safer && await guarded(selectFormat(safer), signal);
+      check(signal);
+      if (!supported) throw error;
+      recovered = true; size = safer; format = supported;
+      onProgress({ stage: 'Retrying with a lighter export…', fraction: 0 });
+      await new Promise(resolve => setTimeout(resolve, 0)); check(signal);
+      joins = await prepare(size, simplified);
+      continue;
+    }
+    const checked = await reviewJoins({ result, ordered, getBlob, signal, onProgress });
+    qualityChecks = qualityChecks.concat(checked);
+    const rejected = checked.filter(join => !join.ok);
+    if (rejected.length && !simplified) {
+      // Retry once with original pictures at the same chosen cuts. Removing all
+      // optional effects prevents a second enhancement/review loop, and never
+      // changes footage selection, duration, order or sound.
+      simplified = true; simplifiedJoins = joins.flatMap((join, index) => join ? [{ index, reason: rejected.find(item => item.index === index)?.reason || 'simpler-export' }] : []);
+      result.blob = null; result = null; joins = timeline.slice(1).map(() => null);
+      onProgress({ stage: 'Using cleaner original-frame connections…', fraction: 0 });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      continue;
+    }
+    check(signal);
+    return { ...result, recovered, simplifiedJoins, qualityChecks };
+  }
 }

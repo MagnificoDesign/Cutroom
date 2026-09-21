@@ -2,7 +2,7 @@ import { Input, ALL_FORMATS, BlobSource, VideoSampleSink } from './mediabunny.mj
 import { guarded, describePixels } from './media.mjs?v=8';
 import { check } from './vault.mjs?v=6';
 import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=9';
-import { FRAME_RATE } from './render-core.mjs?v=11';
+import { FRAME_RATE } from './render-core.mjs?v=12';
 import { createPainter } from './color-gpu.mjs?v=11';
 import { chooseFinishing, validateFinishing } from './finish-core.mjs?v=11';
 
@@ -15,7 +15,7 @@ export function canSmoothJoin(clips, timeline, index, plan) {
   return aa?.width > 0 && bb?.width > 0 && aa.height > 0 && bb.height > 0 && Math.abs(aa.width / aa.height / (bb.width / bb.height) - 1) < .01;
 }
 
-async function pictures(blob, requests, size, signal, small) {
+export async function pictures(blob, requests, size, signal, small) {
   check(signal);
   const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
   const abort = () => input.dispose();

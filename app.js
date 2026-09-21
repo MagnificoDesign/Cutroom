@@ -1,10 +1,10 @@
 import { openVault, check } from './vault.mjs?v=10';
-import { probe, sample, thumbnail } from './media.mjs?v=8';
-import { analyzeJoins } from './analyze.mjs?v=9';
-import { renderEdit } from './renderer.mjs?v=11';
+import { probe, thumbnail } from './media.mjs?v=8';
+import { analyzeJoins } from './analyze.mjs?v=12';
+import { renderEdit } from './renderer.mjs?v=12';
 
 const $ = selector => document.querySelector(selector);
-const state = { clips: [], saved: [], analyses: new Map(), plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio' };
+const state = { clips: [], saved: [], plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio' };
 let vault, session = new AbortController(), unlocking = false, picker = null, creating = null;
 const thumbnails = new Map();
 let thumbnailJob = null, clipPreview = null, joinPreview = null;
@@ -27,7 +27,7 @@ function clearPlan() {
   if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
   if (state.result?.url) URL.revokeObjectURL(state.result.url);
   state.result = null;
-  state.analyses.clear(); state.plan = null; state.screen = 'studio';
+  state.plan = null; state.screen = 'studio';
 }
 function explain(error, stage = 'import') {
   if (stage === 'create' && ['OperationError', 'EncodingError', 'NotSupportedError'].includes(error?.name)) return 'This browser could not finish the export. Your clips are still ready. Try a shorter edit or update your browser.';
@@ -298,25 +298,10 @@ async function create({ keepFull = false } = {}) {
     if (state.clips.length > 12) throw new Error('For this version, choose up to 12 videos for one edit.');
     wakeLock = await navigator.wakeLock?.request('screen').catch(() => null);
     check(signal);
-    for (let index = 0; !keepFull && index < state.clips.length; index++) {
-      check(signal);
-      state.message = `Analyzing video ${index + 1} of ${state.clips.length}…`;
-      state.progress = index / state.clips.length * .2;
-      render();
-      const clip = state.clips[index];
-      const frames = await sample(await vault.blob(clip, signal), signal);
-      check(signal);
-      state.analyses.set(clip.id, frames);
-    }
-    state.message = 'Choosing the order and cut points…';
-    state.progress = .2;
-    render();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    check(signal);
-    const entries = state.clips.map(clip => ({ ...clip, samples: state.analyses.get(clip.id) }));
+    const entries = state.clips;
     const plan = keepFull ? { segments: entries.map(clip => ({ id: clip.id, start: 0, end: clip.duration })), improved: false, joins: [], reviewed: [] } : await analyzeJoins({
       clips: entries, signal, getBlob: (clip, signal) => vault.blob(clip, signal),
-      onProgress: ({ stage, fraction }) => { check(signal); state.message = stage; state.progress = .2 + fraction * .28; render(); }
+      onProgress: ({ stage, fraction }) => { check(signal); state.message = stage; state.progress = fraction * .48; render(); }
     });
     check(signal);
     state.plan = plan;
@@ -330,6 +315,7 @@ async function create({ keepFull = false } = {}) {
       }
     });
     check(signal);
+    delete state.plan.sourceInfos; // Packet timing was shared by analysis/export only.
     await probe(result.blob, signal); // The same browser must also load the output for playback.
     check(signal);
     state.result = { ...result, url: URL.createObjectURL(result.blob) };
@@ -414,7 +400,7 @@ function lock() {
   render();
 }
 
-const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.11</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.12</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
 function render() {
   // A status/error rerender must not leave a detached player or join loop alive.
   stopJoinPreview(true);
@@ -445,6 +431,9 @@ function render() {
     const details = [];
     if (result.copiedPicture) details.push('Original compressed picture was kept without another video compression pass. Sound follows the edit.');
     else details.push(`${result.mixedCadence ? 'Original picture timing is kept across different frame rates, up to' : 'Picture cadence:'} ${Number(result.frameRate.toFixed(2))} fps${result.reduced ? '. A smaller export was used to fit this browser and edit' : ''}.`);
+    if (result.qualityChecks?.some(join => join.ok) && !result.simplifiedJoins?.length) details.push('Rendered connections were checked against the original picture sequences.');
+    if (result.simplifiedJoins?.length) details.push('Original-frame cuts were used after a connection did not pass the picture checks.');
+    if (result.recovered) details.push('Creation retried successfully at lighter export settings.');
     if (result.hdrConverted) details.push('HDR footage was converted to standard color with highlight roll-off for consistent playback.');
     const aligned = result.finishedJoins?.filter(join => join.aligned).length || 0;
     const matched = result.finishedJoins?.filter(join => join.colorMatched).length || 0;

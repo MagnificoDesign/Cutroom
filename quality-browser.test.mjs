@@ -53,6 +53,7 @@ for (const transfer of ['pq', 'hlg']) {
   for (let i = plane * 2; i < raw.length; i += 2) raw.writeUInt16LE(512, i);
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'yuv420p10le', '-video_size', '256x144', '-framerate', '24', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-vf', 'loop=loop=11:size=1:start=0', '-t', '0.5', '-c:v', 'libvpx-vp9', '-lossless', '1', '-profile:v', '2', '-color_primaries', 'bt2020', '-color_trc', transfer === 'pq' ? 'smpte2084' : 'arib-std-b67', '-colorspace', 'bt2020nc', '-color_range', 'tv', '-c:a', 'libopus', resolve(directory, `${transfer}.webm`)], { input: raw }); remember(`${transfer}.webm`);
 }
+ffmpeg(['-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=12', '-f', 'lavfi', '-i', 'aevalsrc=0.12*sin(2*PI*439*t)|0.09*sin(2*PI*771*t):s=44100', '-af', 'adelay=270|270', '-t', '33', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '22', '-c:a', 'aac', '-b:a', '160k', resolve(directory, 'long-stereo.mp4')]); remember('long-stereo.mp4');
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://localhost').pathname;
   if (path === '/harness') { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Quality checks</title>'); return; }
@@ -70,7 +71,7 @@ async function run(name, action) {
   if (process.env.CUTROOM_TEST_MATCH && !name.includes(process.env.CUTROOM_TEST_MATCH)) return;
   const context = await browser.newContext(), page = await context.newPage(), errors = [], requests = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('request', request => { if (!request.url().startsWith(base + '/')) requests.push(request.url()); });
+  page.on('request', request => { if (!request.url().startsWith(base + '/') && !request.url().startsWith('blob:' + base + '/')) requests.push(request.url()); });
   try { await page.goto(base + '/harness'); await action(page); assert.deepEqual(errors, []); assert.deepEqual(requests, []); console.log(`PASS quality: ${name}`); }
   catch (error) { failures++; console.error(`FAIL quality: ${name}\n${error.stack}`); }
   finally { await context.close(); }
@@ -96,6 +97,116 @@ async function render(page, names, options = {}) {
   return { ...result, path };
 }
 try {
+  await run('native cut inspection requests actual 24 60 and VFR pictures and reuses timing for export', async page => {
+    const result = await page.evaluate(async () => {
+      const { analyzeJoins } = await import('/analyze.mjs');
+      const { inspectMedia, probe } = await import('/media.mjs?v=8');
+      const { renderEdit } = await import('/renderer.mjs');
+      const names = ['rate24.mp4', 'rate60.mp4', 'vfr.mp4'], blobs = new Map(), clips = [], requests = [];
+      for (const name of names) { const blob = await (await fetch('/test-results/quality/' + name)).blob(); blobs.set(name, blob); clips.push({ id: name, name, ...await probe(blob) }); }
+      const getBlob = clip => blobs.get(clip.id), signal = new AbortController().signal;
+      const plan = await analyzeJoins({ clips, getBlob, signal, inspect: async (blob, times, signal, options) => {
+        requests.push({ id: [...blobs].find(([, value]) => value === blob)[0], times });
+        return inspectMedia(blob, times, signal, options);
+      } });
+      const stages = [], output = await renderEdit({ clips, segments: plan.segments, plan, getBlob, signal, onProgress: p => stages.push(p.stage) });
+      return { requests, times: Object.fromEntries(plan.sourceInfos.map(info => [info.id, info.packets.map(p => p.timestamp)])), segments: plan.segments, rescanned: stages.some(stage => stage.startsWith('Checking video quality')), duration: output.duration };
+    });
+    for (const request of result.requests) for (const time of request.times) assert(result.times[request.id].some(t => Math.abs(t - (time - .000001)) < .000001), `${request.id}: ${time}`);
+    assert(result.requests.some(r => r.id === 'rate60.mp4' && r.times.some(t => Math.abs((t - .000001) * 30 - Math.round((t - .000001) * 30)) > .1)), 'inspect the intervening 60 fps frame');
+    assert(result.segments.every(p => p.start === 0 && p.end === 1), 'continuous audible material stays intact');
+    assert.equal(result.rescanned, false); assert(Math.abs(result.duration - 3) < .03);
+  });
+  await run('long stereo export uses one-second PCM blocks with no seams or timing drift', async page => {
+    await page.evaluate(async () => {
+      const { AudioBufferSource } = await import('/mediabunny.mjs?v=6'), add = AudioBufferSource.prototype.add;
+      window.audioBlocks = [];
+      AudioBufferSource.prototype.add = function(buffer) { window.audioBlocks.push(buffer.length); return add.call(this, buffer); };
+    });
+    const start = .073713, end = 32.213137;
+    const result = await render(page, ['long-stereo.mp4'], { segments: [{ id: 'long-stereo.mp4', start, end }] });
+    const blocks = await page.evaluate(() => window.audioBlocks);
+    assert.equal(blocks.length, 33); assert(Math.max(...blocks) <= 48000);
+    assert.equal(blocks.reduce((a, b) => a + b, 0), Math.round((end - start) * 48000));
+    assert(Math.abs(result.duration - (end - start)) < .03);
+    const bytes = ffmpeg(['-i', result.path, '-vn', '-ac', '2', '-ar', '48000', '-f', 'f32le', '-']);
+    const pcm = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.length / 4);
+    for (let second = 1; second <= 31; second++) for (const [channel, frequency] of [[0, 439], [1, 771]]) {
+      let energy = 0, real = 0, imaginary = 0, jump = 0;
+      for (let n = 0; n < 4800; n++) { const index = second * 48000 - 2400 + n, value = pcm[index * 2 + channel]; energy += value ** 2; real += value * Math.cos(2 * Math.PI * frequency * n / 48000); imaginary += value * Math.sin(2 * Math.PI * frequency * n / 48000); jump = Math.max(jump, Math.abs(value - pcm[(index - 1) * 2 + channel])); }
+      assert(energy > 10); assert((real * real + imaginary * imaginary) / (energy * 4800) > .45, `tone changed near block ${second}`); assert(jump < .025, `audio discontinuity near ${second}s`);
+    }
+    console.log(`Long PCM: ${blocks.length} blocks, maximum ${Math.max(...blocks)} samples/channel; stereo tones continuous across all 31 interior seconds.`);
+  });
+  await run('a runtime encoder failure releases resources and retries once at a supported lighter profile', async page => {
+    await page.evaluate(async () => {
+      const { CanvasSource, Output } = await import('/mediabunny.mjs?v=6'), add = CanvasSource.prototype.add, cancel = Output.prototype.cancel;
+      let calls = 0; window.retryEvents = [];
+      CanvasSource.prototype.add = function(...args) { if (++calls === 5) { window.retryEvents.push('failure'); throw new DOMException('Injected hardware encoder exhaustion', 'OperationError'); } if (calls === 6) window.retryEvents.push('retry'); return add.apply(this, args); };
+      Output.prototype.cancel = async function(...args) { const result = await cancel.apply(this, args); window.retryEvents.push('released'); return result; };
+    });
+    const result = await render(page, ['detail60.mp4']);
+    assert(result.recovered && result.reduced);
+    assert.deepEqual([result.width, result.height, result.frameRate], [1280, 720, 30]);
+    assert.equal(frames(result.path).length, 15);
+    const events = await page.evaluate(() => window.retryEvents);
+    assert(events.indexOf('released') > events.indexOf('failure') && events.indexOf('released') < events.indexOf('retry'), JSON.stringify(events));
+  });
+  await run('a second encode failure stops and cancellation between attempts never retries', async page => {
+    const result = await page.evaluate(async () => {
+      const { CanvasSource } = await import('/mediabunny.mjs?v=6'), { renderEdit } = await import('/renderer.mjs');
+      const blob = await (await fetch('/test-results/quality/detail60.mp4')).blob(), clip = { id: 'a', name: 'a', width: 1920, height: 1080, duration: .5 };
+      let calls = 0, retries = 0;
+      CanvasSource.prototype.add = () => { calls++; throw new DOMException('Injected encoder failure', 'OperationError'); };
+      const run = async controller => { try { await renderEdit({ clips: [clip], segments: [{ id: 'a', start: 0, end: .5 }], getBlob: () => blob, signal: controller.signal, onProgress: p => { if (p.stage.startsWith('Retrying')) { retries++; if (window.cancelRetry) controller.abort(); } } }); return 'returned'; } catch (error) { return error.name; } };
+      const failed = await run(new AbortController()), first = { calls, retries };
+      calls = retries = 0; window.cancelRetry = true;
+      const cancelled = await run(new AbortController()); return { failed, first, cancelled, calls, retries };
+    });
+    assert.equal(result.failed, 'ExportResourceError'); assert.deepEqual(result.first, { calls: 2, retries: 1 });
+    assert.equal(result.cancelled, 'AbortError'); assert.equal(result.calls, 1); assert.equal(result.retries, 1);
+  });
+  await run('decoded transition damage discards the enhanced movie and returns an original-frame export', async page => {
+    await page.evaluate(async () => {
+      const { CanvasSource } = await import('/mediabunny.mjs?v=6'), add = CanvasSource.prototype.add;
+      const encode = VideoEncoder.prototype.encode;
+      window.renderRounds = 0;
+      CanvasSource.prototype.add = function(...args) { if (args[0] === 0) window.renderRounds++; return add.apply(this, args); };
+      // Corrupt one encoded picture after the enhancement passed its source
+      // checks. This exercises actual decode/review/re-render, not a stub verdict.
+      VideoEncoder.prototype.encode = function(frame, ...args) {
+        if (window.renderRounds === 1 && frame.timestamp >= 1000000 && frame.timestamp < 1030000) {
+          const canvas = document.createElement('canvas'); canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
+          const context = canvas.getContext('2d'); context.drawImage(frame, 0, 0); context.fillStyle = 'rgba(255,255,255,0.4)'; context.fillRect(0, 0, canvas.width, canvas.height);
+          const replacement = new VideoFrame(canvas, { timestamp: frame.timestamp, duration: frame.duration });
+          try { return encode.call(this, replacement, ...args); } finally { replacement.close(); }
+        }
+        return encode.call(this, frame, ...args);
+      };
+    });
+    const safe = await render(page, ['finish0.mp4', 'finish1.mp4'], { finish: true });
+    assert(safe.qualityChecks.some(check => !check.ok && check.reason === 'brightness'), JSON.stringify(safe.qualityChecks));
+    assert.equal(safe.simplifiedJoins.length, 1); assert.equal(safe.finishedJoins.length, 0); assert.equal(safe.smoothedJoins.length, 0);
+    assert.equal(await page.evaluate(() => window.renderRounds), 2);
+    const plain = await render(page, ['finish0.mp4', 'finish1.mp4']);
+    assert.equal(frames(safe.path).length, 60); assert(Math.abs(safe.duration - plain.duration) < .001);
+    assert.deepEqual(picture(safe.path, 30), picture(plain.path, 30));
+    const sound = path => ffmpeg(['-i', path, '-vn', '-ac', '2', '-ar', '48000', '-f', 'f32le', '-']);
+    assert.deepEqual(sound(safe.path), sound(plain.path));
+  });
+  await run('cancelling actual rendered-connection review publishes nothing and starts no simpler render', async page => {
+    const result = await page.evaluate(async () => {
+      const { renderEdit } = await import('/renderer.mjs'), { CanvasSource } = await import('/mediabunny.mjs?v=6');
+      const { probe } = await import('/media.mjs?v=8');
+      const blobs = new Map(), clips = [], controller = new AbortController(); let rounds = 0, encoded = false;
+      const add = CanvasSource.prototype.add;
+      CanvasSource.prototype.add = function(...args) { if (args[0] === 0) rounds++; encoded = true; return add.apply(this, args); };
+      for (const name of ['finish0.mp4', 'finish1.mp4']) { const blob = await (await fetch('/test-results/quality/' + name)).blob(); blobs.set(name, blob); clips.push({ id: name, name, ...await probe(blob) }); }
+      try { await renderEdit({ clips, segments: clips.map(clip => ({ id: clip.id, start: 0, end: 1 })), plan: { joins: [], reviewed: [] }, getBlob: clip => blobs.get(clip.id), signal: controller.signal, onProgress: p => { if (encoded && p.fraction === .98) controller.abort(); } }); return { returned: true }; }
+      catch (error) { return { name: error.name, rounds }; }
+    });
+    assert.equal(result.name, 'AbortError'); assert.equal(result.rounds, 1);
+  });
   await run('1080p60 retains measured detail, all native frames and audible sound', async page => {
     const result = await render(page, ['detail60.mp4']);
     assert.deepEqual([result.width, result.height, result.frameRate], [1920, 1080, 60]);
@@ -135,7 +246,7 @@ try {
   await run('framing and exposure correction reduce a decoded seam without changing sound', async page => {
     const clean = await render(page, ['finish0.mp4', 'finish1.mp4'], { finish: true });
     const plain = await render(page, ['finish0.mp4', 'finish1.mp4']);
-    assert.equal(clean.finishedJoins.length, 1, JSON.stringify(clean.finishedJoins));
+    assert.equal(clean.finishedJoins.length, 1, JSON.stringify({ finished: clean.finishedJoins, checked: clean.qualityChecks }));
     assert(clean.finishedJoins[0].aligned && clean.finishedJoins[0].colorMatched);
     const error = (a, b) => { let sum = 0; for (let y = 15; y < 345; y++) for (let x = 15; x < 625; x++) sum += Math.abs(a[(y * 640 + x) * 3] - b[(y * 640 + x) * 3]); return sum; };
     const before = error(picture(plain.path, 29), picture(plain.path, 30)), after = error(picture(clean.path, 29), picture(clean.path, 30));

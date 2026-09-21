@@ -353,7 +353,7 @@ try {
       assert.equal(times.length, 116, 'Every planned frame, including each final frame, is encoded');
       assert(times.every((time, index) => !index || time > times[index - 1]), 'Every output frame must advance time, including around cuts');
       // Decode the whole export using an independent decoder, not only its metadata.
-      execFileSync('ffmpeg', ['-v', 'error', '-xerror', '-i', path, '-fps_mode', 'passthrough', '-f', 'null', '-']);
+      execFileSync('ffmpeg', ['-v', 'error', '-xerror', '-i', path, '-fps_mode', 'passthrough', '-enc_time_base:v', '1:1000000', '-f', 'null', '-']);
       for (const [time, channel] of [[.4, 2], [2, 1], [3.3, 0], [expectedDuration - .04, 0]]) {
         const rgb = execFileSync('ffmpeg', ['-v', 'error', '-ss', String(time), '-i', path, '-frames:v', '1', '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-']);
         assert.equal(rgb.length, 3);
