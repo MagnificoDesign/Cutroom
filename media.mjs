@@ -73,6 +73,27 @@ export function probe(file, signal) {
   }));
 }
 
+// Temporary preview only: callers keep the returned image in memory and revoke
+// its URL when the selection changes or the vault locks. No plaintext DB writes.
+export function thumbnail(blob, signal) {
+  return withVideo(blob, signal, async video => {
+    const time = Math.min(.15, video.duration / 3);
+    if (time > .001) await waitFor(video, 'seeked', signal, () => { video.currentTime = time; });
+    check(signal);
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 192 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    try {
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      const image = await guarded(new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .7)), signal);
+      check(signal);
+      if (!image) throw new Error('The video preview could not be made.');
+      return image;
+    } finally { canvas.width = canvas.height = 1; }
+  });
+}
+
 export function sample(blob, signal) {
   return withVideo(blob, signal, async video => {
     const canvas = document.createElement('canvas');

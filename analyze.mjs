@@ -1,6 +1,8 @@
-import { inspectMedia } from './media.mjs?v=6';
+import { inspectMedia } from './media.mjs?v=8';
 import { check } from './vault.mjs?v=6';
-import { planEdit } from './planner.mjs?v=6';
+import { planEditAsync } from './planner.mjs?v=9';
+import { refineMotion } from './motion.mjs?v=9';
+import { soundWindow, soundRanges, pauseCandidates } from './audio-cuts.mjs?v=8';
 import { coarseCandidates, refineAlignment, overlapSeams, verifySound, MIN_OVERLAP, MAX_OVERLAP } from './overlap.mjs?v=6';
 
 export function frameTimes(start, end, duration, rate = 30) {
@@ -31,7 +33,7 @@ export async function analyzeJoins({ clips, getBlob, signal, onProgress = () => 
   for (const group of groups.slice(selected.length)) reviewed.push({ a: group.a.id, b: group.b.id, reason: 'not-checked' });
   for (let index = 0; index < selected.length; index++) {
     check(signal);
-    onProgress({ stage: `Checking matching footage ${index + 1} of ${selected.length}…`, fraction: index / Math.max(1, selected.length) * .7 });
+    onProgress({ stage: `Checking matching footage ${index + 1} of ${selected.length}…`, fraction: index / Math.max(1, selected.length) * .5 });
     const { a, b, candidates, contained } = selected[index];
     const lo = Math.max(0, Math.min(...[...candidates, ...contained].map(item => item.offset - item.step * 1.3 - .1)));
     const hi = Math.min(b.duration, a.duration - lo + .1);
@@ -77,8 +79,45 @@ export async function analyzeJoins({ clips, getBlob, signal, onProgress = () => 
   }
   // Remove redundant review notices for pairs whose sequence was fully verified.
   const uncertain = reviewed.filter(pair => !verified.some(match => match.a === pair.a && match.b === pair.b || match.a === pair.b && match.b === pair.a));
-  const first = planEdit(clips, { verified, reviewed: uncertain });
   const protectedIds = new Set([...verified, ...uncertain].flatMap(pair => [pair.a, pair.b]));
+  const detailed = clips.map(clip => ({ ...clip }));
+  const visual = await planEditAsync(detailed, { verified, reviewed: uncertain }, signal);
+  const soundClips = detailed.filter(clip => detailed.length > 1 && !protectedIds.has(clip.id));
+  for (let index = 0; index < soundClips.length; index++) {
+    check(signal);
+    const clip = soundClips[index];
+    onProgress({ stage: `Checking sound ${index + 1} of ${soundClips.length}…`, fraction: .5 + index / soundClips.length * .22 });
+    // Unavailable/unchecked sound cannot authorize a new interior trim.
+    clip.sound = { status: 'unavailable', windows: [] };
+    try {
+      const blob = await getBlob(clip, signal), windows = [];
+      check(signal);
+      for (const range of soundRanges(clip, visual.segments.find(part => part.id === clip.id))) {
+        const inspected = await inspect(blob, [], signal, { audioRange: range });
+        check(signal);
+        windows.push(soundWindow(inspected.audio));
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      clip.sound = { status: 'checked', windows };
+      // Quiet pauses can sit between sparse visual samples. Inspect those
+      // moments before accepting them as candidates in the joint planner.
+      const extraTimes = new Set();
+      for (const time of [...pauseCandidates(clip, 'in'), ...pauseCandidates(clip, 'out')]) {
+        for (const t of frameTimes(time - .15, time + .16, clip.duration)) extraTimes.add(t);
+      }
+      if (extraTimes.size) {
+        const extra = await inspect(blob, [...extraTimes].sort((a, b) => a - b), signal);
+        check(signal);
+        const merged = new Map(clip.samples.map(frame => [frame.t.toFixed(6), frame]));
+        for (const frame of extra.frames) merged.set(frame.t.toFixed(6), frame);
+        clip.samples = [...merged.values()].sort((a, b) => a.t - b.t);
+      }
+    } catch (error) {
+      check(signal);
+      clip.sound = { status: 'unavailable', windows: [] };
+    }
+  }
+  const first = await planEditAsync(detailed, { verified, reviewed: uncertain }, signal);
   const refine = new Map();
   for (let i = 0; i < first.segments.length; i++) {
     const part = first.segments[i];
@@ -90,12 +129,11 @@ export async function analyzeJoins({ clips, getBlob, signal, onProgress = () => 
     for (const time of [...fineIn, ...fineOut]) for (const nearby of frameTimes(Math.max(0, time - .15), Math.min(clip.duration, time + .16), clip.duration)) times.add(nearby);
     if (times.size) refine.set(part.id, { fineIn: [...new Set([part.start, ...fineIn])], fineOut: [...new Set([part.end, ...fineOut])], times: [...times].sort((a, b) => a - b) });
   }
-  const detailed = clips.map(clip => ({ ...clip }));
   let count = 0;
   for (const clip of detailed) {
     check(signal);
     if (!refine.has(clip.id)) continue;
-    onProgress({ stage: `Refining the joins ${++count} of ${refine.size}…`, fraction: .7 + count / Math.max(1, refine.size) * .3 });
+    onProgress({ stage: `Refining the joins ${++count} of ${refine.size}…`, fraction: .72 + count / Math.max(1, refine.size) * .22 });
     const request = refine.get(clip.id);
     try {
       const dense = await inspect(await getBlob(clip, signal), request.times, signal);
@@ -107,6 +145,8 @@ export async function analyzeJoins({ clips, getBlob, signal, onProgress = () => 
     } catch (error) { check(signal); /* Retain the valid coarse plan if extra sampling fails. */ }
   }
   check(signal);
-  const plan = planEdit(detailed, { verified, reviewed: uncertain });
+  onProgress({ stage: 'Matching movement across the joins…', fraction: .96 });
+  await refineMotion(detailed, signal);
+  const plan = await planEditAsync(detailed, { verified, reviewed: uncertain }, signal);
   return { ...plan, verifiedOverlaps: verified.length };
 }

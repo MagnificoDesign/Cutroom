@@ -1,21 +1,25 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolve, extname } from 'node:path';
+import { resolve, extname, basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { chromium, webkit } from 'playwright';
 
 const root = fileURLToPath(new URL('./', import.meta.url));
 const output = resolve(root, 'test-results');
+const fixtureBytes = new Map();
 await mkdir(output, { recursive: true });
 // Synthetic picture and sound only. No personal media is used or uploaded.
 const fixture = resolve(output, 'harmless.mp4');
 execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=12', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100', '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', fixture]);
 const video = await readFile(fixture);
+fixtureBytes.set('harmless.mp4', video);
 const largeVideo = Buffer.concat([video, Buffer.alloc(12 * 1024 * 1024)]);
 for (const [color, frequency] of [['red', 440], ['lime', 660], ['blue', 880]]) {
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:size=160x90:rate=30`, '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=44100`, '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', resolve(output, `${color}.mp4`)]);
+  fixtureBytes.set(`${color}.mp4`, readFileSync(resolve(output, `${color}.mp4`)));
 }
 // One eight-second event, split into overlapping 0–4, 2–6 and 4–8 clips.
 // A visible binary frame number lets an independent decoder prove that the
@@ -33,8 +37,42 @@ for (let frame = 0; frame < 240; frame++) for (let y = 0; y < 90; y++) for (let 
 execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', '160x90', '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'aevalsrc=0.12*sin(2*PI*(220*t+15*t*t))+0.03*sin(2*PI*713*t):s=48000', '-t', '8', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', master], { input: raw });
 // Keep the independently decoded reference immutable across asynchronous runs.
 const masterSound = execFileSync('ffmpeg', ['-v', 'error', '-i', master, '-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-']);
+// A known smooth camera pan, cut into two clips with one omitted source frame.
+// The reference geometry allows an independent export check of the actual join.
+for (const [id, offset] of [['pan-a', 0], ['pan-b', 61], ['pan-c', 122]]) {
+  const width = 320, height = 180, pixels = Buffer.alloc(60 * width * height * 3);
+  for (let frame = 0; frame < 60; frame++) for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const px = x * 96 / width - (offset + frame) * .6, py = y * 54 / height;
+    const value = 128 + 32 * Math.sin(px * .27) + 29 * Math.sin(py * .36) + 20 * Math.sin(px * .81 + py * .57) + 15 * Math.cos(px * .39 - py * .85);
+    const at = ((frame * height + y) * width + x) * 3;
+    pixels[at] = pixels[at + 1] = pixels[at + 2] = Math.round(value);
+  }
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', `${width}x${height}`, '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2', '-c:v', 'libx264', '-crf', '15', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(output, `${id}.mp4`)], { input: pixels });
+  fixtureBytes.set(`${id}.mp4`, readFileSync(resolve(output, `${id}.mp4`)));
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', resolve(output, `${id}.mp4`), '-vf', 'scale=1280:720', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', resolve(output, `${id}-large.mp4`)]);
+  fixtureBytes.set(`${id}-large.mp4`, readFileSync(resolve(output, `${id}-large.mp4`)));
+}
+// Separate, slightly differently framed shots with a compatible middle view.
+// Their encoded sound has genuine pauses away from the best sparse visual cut.
+for (const [id, width, frequency, pauseStart, pauseEnd] of [['pause-a', 160, 440, 2.05, 2.55], ['pause-b', 164, 660, .85, 1.25]]) {
+  const pixels = Buffer.alloc(120 * width * 90 * 3);
+  for (let frame = 0; frame < 120; frame++) {
+    const t = frame / 30;
+    const shape = id === 'pause-a' ? t < 1 ? 0 : t < 2.75 ? 1 : 2 : t < .75 ? 3 : t < 2.75 ? 1 : 4;
+    for (let y = 0; y < 90; y++) for (let x = 0; x < width; x++) {
+      const tile = Math.floor(y / 15) * 8 + Math.floor(x / width * 8);
+      const value = Math.round(60 + Math.abs(Math.sin(tile * 9.17 + shape * 33.13)) * 140);
+      const at = ((frame * 90 + y) * width + x) * 3;
+      pixels[at] = pixels[at + 1] = pixels[at + 2] = value;
+    }
+  }
+  const sound = `aevalsrc=if(between(t\\,${pauseStart}\\,${pauseEnd})\\,0\\,0.12*sin(2*PI*${frequency}*t)):s=48000`;
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', `${width}x90`, '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', sound, '-t', '4', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', resolve(output, `${id}.mp4`)], { input: pixels });
+  fixtureBytes.set(`${id}.mp4`, readFileSync(resolve(output, `${id}.mp4`)));
+}
 for (const [name, offset, quality, filter] of [['overlap-a', 0, 19, 'null'], ['overlap-b', 2, 26, 'eq=brightness=0.015:contrast=1.025'], ['overlap-c', 4, 23, 'null']]) {
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-ss', String(offset), '-i', master, '-t', '4', '-vf', filter, '-c:v', 'libx264', '-crf', String(quality), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(output, `${name}.mp4`)]);
+  fixtureBytes.set(`${name}.mp4`, readFileSync(resolve(output, `${name}.mp4`)));
 }
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
@@ -42,7 +80,9 @@ const server = createServer(async (request, response) => {
   const target = resolve(root, '.' + (path === '/' ? '/index.html' : path));
   if (!target.startsWith(root)) { response.writeHead(403); response.end(); return; }
   try {
-    const body = await readFile(target);
+    // Freeze complete generated inputs before asynchronous browser runs. Tests
+    // should not consume an intermediate file from an external workspace sync.
+    const body = path.startsWith('/test-results/') && fixtureBytes.get(basename(path)) || await readFile(target);
     response.writeHead(200, { 'Content-Type': ({ '.js': 'text/javascript', '.mjs': 'text/javascript', '.html': 'text/html', '.css': 'text/css', '.webmanifest': 'application/manifest+json' })[extname(target)] || 'application/octet-stream' });
     response.end(body);
   } catch { response.writeHead(404); response.end(); }
@@ -60,13 +100,29 @@ async function choose(page, files) {
   const chosen = page.waitForEvent('filechooser');
   await page.locator('#add').click();
   const chooser = await chosen;
-  await chooser.setFiles(files);
+  await chooser.setFiles(files.map(file => typeof file === 'string' && fixtureBytes.has(basename(file)) ? { name: basename(file), mimeType: 'video/mp4', buffer: fixtureBytes.get(basename(file)) } : file));
 }
 async function visibility(page, state) {
   await page.evaluate(state => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: state });
     document.dispatchEvent(new Event('visibilitychange'));
   }, state);
+}
+async function storedCopies(page) {
+  return page.evaluate(async () => {
+    const { openVault } = await import('/vault.mjs?v=10');
+    const vault = await openVault();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = vault.db.transaction(['clips', 'chunks', 'meta']);
+        const result = {};
+        for (const name of ['clips', 'chunks']) tx.objectStore(name).count().onsuccess = event => { result[name] = event.target.result; };
+        tx.objectStore('meta').getAllKeys().onsuccess = event => { result.meta = event.target.result; };
+        tx.oncomplete = () => resolve(result);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally { vault.db.close(); }
+  });
 }
 try {
   for (const name of (process.env.CUTROOM_TEST_BROWSERS || 'chromium,webkit').split(',')) {
@@ -410,11 +466,9 @@ try {
       await page.reload();
       await unlock(page);
       assert.equal(await page.locator('.clip').count(), 0);
-      await page.locator('#previous summary').click();
-      await page.locator('#previous input').check();
-      await page.locator('#reuse').click();
-      await page.locator('.clip').waitFor();
-      assert.equal(await page.locator('.clip b').innerText(), 'cancel-render.mp4');
+      assert.equal(await page.locator('#previous').count(), 0);
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
+      assert.doesNotMatch(await page.locator('#app').innerText(), /cancel-render|Previous imports/);
     });
 
     await run('system share receives the correctly named rendered file', async page => {
@@ -440,6 +494,7 @@ try {
       await page.getByRole('button', { name: 'Create New Video', exact: true }).click();
       await page.getByText('Add your videos.', { exact: true }).waitFor();
       assert.equal(await page.locator('.clip').count(), 0);
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
       await choose(page, [{ name: 'new-selection.mp4', mimeType: 'video/mp4', buffer: video }]);
       await page.getByText('1 video ready.', { exact: true }).waitFor();
       assert.deepEqual(await page.locator('.clip b').allTextContents(), ['new-selection.mp4']);
@@ -470,6 +525,320 @@ try {
       await unlock(page);
       assert.equal(await page.locator('.clip').count(), 2);
       assert.equal(await page.locator('#finished').count(), 0);
+    });
+    await run('clip previews, undo, join playback and edit return preserve the selected videos', async page => {
+      await page.goto(base);
+      await unlock(page);
+      await choose(page, ['red', 'lime', 'blue'].map(id => resolve(output, `${id}.mp4`)));
+      await page.getByText('3 videos ready.', { exact: true }).waitFor();
+      await page.waitForFunction(() => document.querySelectorAll('.clip-thumb img').length === 3);
+      await page.screenshot({ path: resolve(output, `${name}-v08-thumbnails.png`) });
+      await page.getByRole('button', { name: 'Preview lime.mp4', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('.source-preview')?.readyState >= 2);
+      const previewUrl = await page.locator('.source-preview').getAttribute('src');
+      await page.locator('.source-preview').evaluate(async video => { await video.play(); });
+      await page.waitForFunction(() => document.querySelector('.source-preview').currentTime > .15);
+      await page.screenshot({ path: resolve(output, `${name}-v08-clip-preview.png`) });
+      await page.locator('#preview-close').click();
+      assert.equal(await page.evaluate(async url => { try { await fetch(url); return false; } catch { return true; } }, previewUrl), true);
+      await page.getByRole('button', { name: 'Remove lime.mp4 from this video', exact: true }).click();
+      await page.locator('#undo').waitFor();
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['red.mp4', 'blue.mp4']);
+      await page.screenshot({ path: resolve(output, `${name}-v08-undo.png`) });
+      await page.locator('#undo').click();
+      await page.getByText('Video restored.', { exact: true }).waitFor();
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['red.mp4', 'lime.mp4', 'blue.mp4']);
+      await page.reload(); await unlock(page);
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['red.mp4', 'lime.mp4', 'blue.mp4']);
+      await page.locator('#create').click();
+      await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
+      const resultUrl = await page.locator('#finished').getAttribute('src');
+      await page.locator('.edit-review summary').click();
+      assert.equal(await page.locator('.join-button').count(), 2);
+      await page.locator('[data-join="0"]').click();
+      await page.getByText('Join 1 preview finished.', { exact: true }).waitFor({ timeout: 15000 });
+      const stopped = await page.locator('#finished').evaluate(video => ({ paused: video.paused, time: video.currentTime, duration: video.duration }));
+      assert(stopped.paused && Math.abs(stopped.time - 4) < .15 && stopped.time < stopped.duration - 1);
+      await page.locator('[data-join="1"]').click();
+      await page.locator('[data-join="0"]').click({ force: true });
+      await page.waitForFunction(() => !document.querySelector('#finished').paused && document.querySelector('#finished').currentTime > .1 && document.querySelector('#finished').currentTime < 2);
+      await page.screenshot({ path: resolve(output, `${name}-v08-joins.png`), fullPage: true });
+      await page.locator('#edit').click();
+      await page.locator('#add').waitFor();
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['red.mp4', 'lime.mp4', 'blue.mp4']);
+      assert.equal(await page.evaluate(async url => { try { await fetch(url); return false; } catch { return true; } }, resultUrl), true);
+      await page.getByRole('button', { name: 'Remove lime.mp4 from this video', exact: true }).click();
+      await page.locator('#undo').waitFor();
+      await page.locator('#create').click();
+      await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
+      assert.deepEqual((await page.locator('.edit-review li b').allTextContents()).sort(), ['blue.mp4', 'red.mp4']);
+      assert.equal((await storedCopies(page)).clips, 2); // Removed lime is no longer retained for Undo.
+      await page.locator('#again').click();
+      await page.getByText('Add your videos.', { exact: true }).waitFor();
+      assert.equal(await page.locator('.clip').count(), 0);
+      assert.equal(await page.locator('#undo').count(), 0);
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
+      await page.screenshot({ path: resolve(output, `${name}-v010-new-video.png`), fullPage: true });
+    });
+
+    await run('old import archives are deleted on upgrade and removed clips do not survive locking', async page => {
+      await page.goto(base + '/harness');
+      await page.evaluate(async password => {
+        const { openVault, seal, CHUNK_SIZE } = await import('/vault.mjs?v=10');
+        const { probe } = await import('/media.mjs?v=8');
+        const vault = await openVault();
+        await vault.unlock(password);
+        const blob = await (await fetch('/test-results/harmless.mp4')).blob();
+        const info = await probe(blob);
+        await vault.importFile(new File([blob, new Uint8Array(CHUNK_SIZE)], 'old-archive.mp4', { type: 'video/mp4' }), info);
+        const current = await vault.importFile(new File([blob], 'current-project.mp4', { type: 'video/mp4' }), info);
+        // Reproduce the old build: a selection record plus an unselected archive.
+        const selected = await seal(vault.key, new TextEncoder().encode(JSON.stringify([current.id])), 'edit-selection');
+        await new Promise((resolve, reject) => {
+          const tx = vault.db.transaction('meta', 'readwrite');
+          tx.objectStore('meta').put(selected, 'edit-selection');
+          tx.oncomplete = resolve; tx.onabort = () => reject(tx.error);
+        });
+        vault.lock(); vault.db.close();
+      }, password);
+      assert.equal((await storedCopies(page)).clips, 2);
+      await page.goto(base); await unlock(page);
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['current-project.mp4']);
+      assert.deepEqual(await storedCopies(page), { clips: 1, chunks: 1, meta: ['edit-selection', 'header'] });
+      assert.doesNotMatch(await page.locator('#app').innerText(), /old-archive|Previous imports/);
+      await page.getByRole('button', { name: 'Remove current-project.mp4 from this video', exact: true }).click();
+      await page.locator('#undo').waitFor();
+      assert.equal(await page.locator('.clip').count(), 0);
+      assert.equal(await page.locator('#new').count(), 1); // Can clear even the last pending Undo.
+      await page.locator('#lock').click();
+      await page.waitForFunction(async () => {
+        const { openVault } = await import('/vault.mjs?v=10');
+        const vault = await openVault();
+        const count = await new Promise(resolve => {
+          vault.db.transaction('clips').objectStore('clips').count().onsuccess = event => resolve(event.target.result);
+        });
+        vault.db.close(); return count === 0;
+      });
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
+      await unlock(page);
+      assert.equal(await page.locator('.clip,#undo,#previous').count(), 0);
+      await choose(page, [{ name: 'next-project.mp4', mimeType: 'video/mp4', buffer: video }]);
+      await page.getByText('1 video ready.', { exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Remove next-project.mp4 from this video', exact: true }).click();
+      await page.locator('#undo').waitFor();
+      await page.locator('#new').click();
+      await page.waitForFunction(() => !document.querySelector('#undo'));
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
+    });
+
+    await run('failed new-video cleanup keeps the project and retries without leaving history', async page => {
+      await page.goto(base); await unlock(page);
+      await choose(page, [{ name: 'keep-until-cleared.mp4', mimeType: 'video/mp4', buffer: video }]);
+      await page.getByText('1 video ready.', { exact: true }).waitFor();
+      await page.evaluate(() => {
+        window.originalClear = IDBObjectStore.prototype.clear;
+        IDBObjectStore.prototype.clear = function (...args) {
+          if (this.name === 'chunks') throw new DOMException('Synthetic cleanup failure', 'UnknownError');
+          return window.originalClear.apply(this, args);
+        };
+      });
+      await page.locator('#new').click();
+      await page.getByText('Your previous videos could not be removed. Please try Create New Video again.', { exact: true }).waitFor();
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['keep-until-cleared.mp4']);
+      assert.deepEqual(await storedCopies(page), { clips: 1, chunks: 1, meta: ['edit-selection', 'header'] });
+      await page.evaluate(() => { IDBObjectStore.prototype.clear = window.originalClear; });
+      await page.locator('#new').click();
+      await page.getByText('Add your videos.', { exact: true }).waitFor();
+      assert.deepEqual(await storedCopies(page), { clips: 0, chunks: 0, meta: ['edit-selection', 'header'] });
+      await page.reload(); await unlock(page);
+      assert.equal(await page.locator('.clip,#previous').count(), 0);
+    });
+
+    await run('locking clears active previews and blocks late thumbnails or decrypted previews', async page => {
+      await page.addInitScript(() => {
+        const original = HTMLCanvasElement.prototype.toBlob;
+        window.originalToBlob = original;
+        HTMLCanvasElement.prototype.toBlob = function (callback, ...args) {
+          return original.call(this, blob => { window.thumbnailWaiting = true; window.releaseThumbnail = () => callback(blob); }, ...args);
+        };
+      });
+      await page.goto(base); await unlock(page);
+      await choose(page, [{ name: 'private-preview.mp4', mimeType: 'video/mp4', buffer: video }]);
+      await page.waitForFunction(() => window.thumbnailWaiting);
+      await page.locator('#lock').click();
+      await page.evaluate(async () => { HTMLCanvasElement.prototype.toBlob = window.originalToBlob; window.releaseThumbnail(); await new Promise(resolve => setTimeout(resolve, 0)); });
+      assert.equal(await page.locator('img,.clip-dialog').count(), 0);
+      assert.doesNotMatch(await page.locator('#app').innerText(), /private-preview/);
+      await unlock(page);
+      await page.waitForFunction(() => document.querySelector('.clip-thumb img'));
+      const poster = await page.locator('.clip-thumb img').getAttribute('src');
+      await page.getByRole('button', { name: 'Preview private-preview.mp4', exact: true }).click();
+      await page.waitForFunction(() => document.querySelector('.source-preview')?.readyState >= 2);
+      const source = await page.locator('.source-preview').getAttribute('src');
+      await page.locator('#preview-lock').click();
+      await page.locator('#p').waitFor();
+      assert.equal(await page.locator('img,.clip-dialog').count(), 0);
+      for (const url of [poster, source]) assert.equal(await page.evaluate(async url => { try { await fetch(url); return false; } catch { return true; } }, url), true);
+      await unlock(page);
+      await page.waitForFunction(() => document.querySelector('.clip-thumb img'));
+      await page.evaluate(() => {
+        const decrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+        crypto.subtle.decrypt = async function (...args) {
+          const data = await decrypt(...args);
+          if (args[2].byteLength > 1000) { window.previewWaiting = true; await new Promise(resolve => { window.releasePreview = resolve; }); }
+          return data;
+        };
+      });
+      await page.getByRole('button', { name: 'Preview private-preview.mp4', exact: true }).click();
+      await page.waitForFunction(() => window.previewWaiting);
+      await page.locator('#preview-lock').click();
+      await page.evaluate(async () => { window.releasePreview(); await new Promise(resolve => setTimeout(resolve, 0)); });
+      assert.equal(await page.locator('img,.clip-dialog').count(), 0);
+      assert.doesNotMatch(await page.locator('#app').innerText(), /private-preview/);
+    });
+
+    await run('decoded acoustic pauses guide the actual edit and rendered source audio', async page => {
+      await page.goto(base + '/harness');
+      const result = await page.evaluate(async () => {
+        const { probe, sample } = await import('/media.mjs');
+        const { analyzeJoins } = await import('/analyze.mjs');
+        const { renderEdit } = await import('/renderer.mjs');
+        const blobs = new Map(await Promise.all(['pause-a', 'pause-b'].map(async id => [id, await (await fetch(`/test-results/${id}.mp4`)).blob()])));
+        const clips = [];
+        for (const [id, blob] of blobs) clips.push({ id, name: id, ...await probe(blob), samples: await sample(blob) });
+        const signal = new AbortController().signal;
+        const plan = await analyzeJoins({ clips, getBlob: clip => blobs.get(clip.id), signal });
+        const rendered = await renderEdit({ clips, segments: plan.segments, getBlob: clip => blobs.get(clip.id), signal });
+        return { plan, timeline: rendered.timeline, extension: rendered.extension, bytes: Array.from(new Uint8Array(await rendered.blob.arrayBuffer())) };
+      });
+      assert.deepEqual(result.plan.segments.map(part => part.id), ['pause-a', 'pause-b']);
+      const [a, b] = result.plan.segments;
+      assert(a.end >= 2.13 && a.end <= 2.47, JSON.stringify(result.plan));
+      assert(b.start >= .93 && b.start <= 1.17, JSON.stringify(result.plan));
+      const path = resolve(output, `${name}-acoustic-pauses.${result.extension}`);
+      await writeFile(path, new Uint8Array(result.bytes));
+      const pcm = execFileSync('ffmpeg', ['-v', 'error', '-i', path, '-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-']);
+      const seam = result.timeline[1].outputStart;
+      for (const [time, frequency] of [[.4, 440], [seam + .45, 660]]) {
+        let crossings = 0, peak = 0, prior = 0;
+        for (let i = Math.round(time * 8000); i < Math.round((time + .2) * 8000); i++) {
+          const value = pcm.readFloatLE(i * 4); if (value > 0 && prior <= 0) crossings++;
+          peak = Math.max(peak, Math.abs(value)); prior = value;
+        }
+        assert(peak > .03 && Math.abs(crossings * 5 - frequency) <= 5);
+      }
+      let peak = 0;
+      for (let i = Math.round((seam - .06) * 8000); i < Math.round((seam + .06) * 8000); i++) peak = Math.max(peak, Math.abs(pcm.readFloatLE(i * 4)));
+      assert(peak < .003, `Join should be in the actual source pause, peak was ${peak}`);
+      console.log(`Verified acoustic cuts at ${a.end.toFixed(3)} / ${b.start.toFixed(3)} sec; decoded export retains both source tones with a quiet join.`);
+    });
+    await run('motion interpolation produces a real export with smooth picture and unchanged sound timing', async page => {
+      await page.goto(base + '/harness');
+      const result = await page.evaluate(async () => {
+        const { probe, sample } = await import('/media.mjs');
+        const { analyzeJoins } = await import('/analyze.mjs');
+        const { renderEdit } = await import('/renderer.mjs');
+        const blobs = new Map(await Promise.all(['pan-a', 'pan-b'].map(async id => [id, await (await fetch(`/test-results/${id}.mp4`)).blob()])));
+        const clips = [];
+        for (const [id, blob] of blobs) clips.push({ id, name: id, ...await probe(blob), samples: await sample(blob) });
+        const signal = new AbortController().signal, getBlob = clip => blobs.get(clip.id);
+        const plan = await analyzeJoins({ clips, getBlob, signal });
+        const started = performance.now();
+        const smooth = await renderEdit({ clips, segments: plan.segments, plan, getBlob, signal });
+        const elapsed = performance.now() - started;
+        const original = await renderEdit({ clips, segments: plan.segments, getBlob, signal });
+        return { plan, elapsed, smoothedJoins: smooth.smoothedJoins, timeline: smooth.timeline, duration: smooth.duration, extension: smooth.extension,
+          bytes: Array.from(new Uint8Array(await smooth.blob.arrayBuffer())), original: Array.from(new Uint8Array(await original.blob.arrayBuffer())) };
+      });
+      assert.deepEqual(result.plan.segments, [{ id: 'pan-a', start: 0, end: 2 }, { id: 'pan-b', start: 0, end: 2 }], JSON.stringify(result.plan));
+      assert.equal(result.smoothedJoins.length, 1, JSON.stringify({ plan: result.plan, smoothing: result.smoothedJoins }));
+      assert(Math.abs(result.duration - 4) < .05);
+      const smoothFile = resolve(output, `${name}-motion-smooth.${result.extension}`), originalFile = resolve(output, `${name}-motion-original.${result.extension}`);
+      await writeFile(smoothFile, new Uint8Array(result.bytes)); await writeFile(originalFile, new Uint8Array(result.original));
+      const decode = (file, audio) => execFileSync('ffmpeg', ['-v', 'error', '-i', file, ...(audio ? ['-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le'] : ['-an', '-vf', 'scale=96:54', '-pix_fmt', 'gray', '-fps_mode', 'passthrough', '-f', 'rawvideo']), '-']);
+      const smooth = decode(smoothFile, false), original = decode(originalFile, false), audio = decode(smoothFile, true), originalAudio = decode(originalFile, true);
+      assert.equal(smooth.length, 120 * 96 * 54); assert.equal(original.length, smooth.length);
+      // Find the best translation against the known, independently generated
+      // world texture at each decoded frame. No Cutroom motion code is used.
+      const position = (data, frame) => {
+        let best = Infinity, value = NaN;
+        for (let shift = frame * .6 - 1; shift <= frame * .6 + 1.5; shift += .025) {
+          let error = 0;
+          for (let y = 5; y < 49; y += 2) for (let x = 5; x < 91; x += 2) {
+            const px = x - shift, py = y;
+            const expected = 128 + 32 * Math.sin(px * .27) + 29 * Math.sin(py * .36) + 20 * Math.sin(px * .81 + py * .57) + 15 * Math.cos(px * .39 - py * .85);
+            error += (data[(frame * 54 + y) * 96 + x] - expected) ** 2;
+          }
+          if (error < best) { best = error; value = shift; }
+        }
+        return value;
+      };
+      const positions = [], baseline = [];
+      for (let frame = 53; frame <= 67; frame++) { positions.push(position(smooth, frame)); baseline.push(position(original, frame)); }
+      const jumps = values => values.slice(1).map((value, i) => value - values[i]);
+      const newSteps = jumps(positions), oldSteps = jumps(baseline);
+      assert(Math.max(...newSteps) < Math.max(...oldSteps) * .8, JSON.stringify({ newSteps, oldSteps }));
+      assert(newSteps.every(step => step > .3 && step < .95), JSON.stringify(newSteps));
+      assert.equal(audio.length, originalAudio.length, 'No added time or audio-sample drift');
+      let difference = 0, energy = 0;
+      for (let i = 0; i < audio.length; i += 4) { difference += (audio.readFloatLE(i) - originalAudio.readFloatLE(i)) ** 2; energy += originalAudio.readFloatLE(i) ** 2; }
+      assert(difference / energy < .0001, `Source sound changed: ${difference / energy}`);
+      console.log(`Motion bridge: ${result.smoothedJoins[0].frames} generated frames; maximum step ${Math.max(...oldSteps).toFixed(3)} → ${Math.max(...newSteps).toFixed(3)} pixels; audio difference ${(difference / energy).toExponential(2)}; software Chromium render ${(result.elapsed / 1000).toFixed(2)}s.`);
+    });
+    await run('locking during interpolation cancels the render and prevents a stale result', async page => {
+      await page.route('**/transition-core.mjs*', async route => {
+        const response = await route.fetch();
+        const source = await response.text();
+        await route.fulfill({ response, body: source.replace('export async function interpolateFrame(bridge, a, b, fraction, signal) {', `export async function interpolateFrame(bridge, a, b, fraction, signal) {
+          window.interpolationWaiting = true;
+          await new Promise(resolve => { window.releaseInterpolation = resolve; });
+          window.interpolationReleased = true;`) });
+      });
+      await page.goto(base); await unlock(page);
+      await choose(page, [resolve(output, 'pan-a.mp4'), resolve(output, 'pan-b.mp4')]);
+      await page.locator('#create:not([disabled])').waitFor();
+      await page.locator('#create').click();
+      await page.waitForFunction(() => window.interpolationWaiting, null, { timeout: 30000 });
+      await page.locator('#lock').click();
+      await page.locator('#p').waitFor();
+      await page.evaluate(() => window.releaseInterpolation());
+      await page.waitForFunction(() => window.interpolationReleased);
+      await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 100)));
+      assert.equal(await page.locator('video,img,#save,#finished').count(), 0);
+      assert.doesNotMatch(await page.locator('#app').innerText(), /pan-a|pan-b|Ready to watch/);
+      await unlock(page);
+      assert.equal(await page.locator('.clip-remove').count(), 2);
+      assert.equal(await page.locator('#finished').count(), 0);
+    });
+    await run('full-size three-clip interpolation renders both joins and restores original frames on request', async page => {
+      await page.goto(base); await unlock(page);
+      await choose(page, ['pan-a', 'pan-b', 'pan-c'].map(id => resolve(output, `${id}-large.mp4`)));
+      await page.locator('#create:not([disabled])').waitFor();
+      await page.locator('#create').click();
+      await page.locator('#finished').waitFor({ timeout: 60000 });
+      await page.locator('summary').click();
+      assert.equal(await page.getByText('Smoothed connection', { exact: false }).count(), 2);
+      assert.match(await page.locator('.edit-review').innerText(), /in-between frames were created across 2 connections/);
+      await page.locator('#finished').evaluate(video => video.play());
+      await page.waitForFunction(() => document.querySelector('#finished').currentTime > .2);
+      await page.locator('#finished').evaluate(video => video.pause());
+      await page.screenshot({ path: resolve(output, `${name}-v09-motion-review.png`), fullPage: true });
+      const before = await page.locator('#finished').getAttribute('src');
+      const media = await page.locator('#finished').evaluate(video => ({ width: video.videoWidth, height: video.videoHeight, duration: video.duration }));
+      assert.equal(media.width, 1280); assert.equal(media.height, 720); assert(Math.abs(media.duration - 6) < .05);
+      await page.locator('#full').click();
+      await page.locator('#finished').waitFor({ timeout: 60000 });
+      const after = await page.locator('#finished').getAttribute('src');
+      assert.notEqual(after, before);
+      await page.locator('summary').click();
+      assert.doesNotMatch(await page.locator('.edit-review').innerText(), /in-between|Smoothed connection/);
+      const exported = await page.locator('#finished').evaluate(async video => Array.from(new Uint8Array(await (await fetch(video.src)).arrayBuffer())));
+      const path = resolve(output, `${name}-motion-full-original.webm`);
+      await writeFile(path, new Uint8Array(exported));
+      const raw = execFileSync('ffmpeg', ['-v', 'error', '-i', path, '-an', '-vf', 'scale=96:54', '-pix_fmt', 'gray', '-fps_mode', 'passthrough', '-f', 'rawvideo', '-']);
+      assert.equal(raw.length, 180 * 96 * 54);
+      assert.equal(await page.evaluate(async url => { try { await fetch(url); return false; } catch { return true; } }, before), true);
+      console.log('Verified 1280×720, 6-second three-clip UI render, both smoothed joins, and full-original restoration.');
     });
     await browser.close();
   }

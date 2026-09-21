@@ -42,6 +42,12 @@ export async function unseal(key, record, context) {
 
 export function check(signal) { signal?.throwIfAborted(); }
 
+async function selectionIds(key, record) {
+  const ids = JSON.parse(decoder.decode(await unseal(key, record, 'edit-selection')));
+  if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string')) throw new Error('Your saved selection could not be read.');
+  return [...new Set(ids)];
+}
+
 // Resolve only after commit, and observe abort as well as request errors.
 function transaction(db, stores, mode, schedule, signal) {
   check(signal);
@@ -114,6 +120,15 @@ export class Vault {
       }
       check(signal);
       await this.recover(signal);
+      // Older builds kept an archive outside the current edit. Authenticate the
+      // selection first, then delete that archive before decrypting clip names.
+      // No selection in an older vault means all its clips are the active edit.
+      const selected = await read(this.db, 'meta', 'edit-selection', signal);
+      if (selected) {
+        const ids = await selectionIds(key, selected);
+        check(signal);
+        await this.retainSelection(ids, selected, signal);
+      }
       const records = await transaction(this.db, ['clips'], 'readonly', (tx, result) => {
         const out = [];
         tx.objectStore('clips').openCursor().onsuccess = event => {
@@ -158,23 +173,55 @@ export class Vault {
       tx.objectStore('chunks').delete(IDBKeyRange.bound(`${id}:`, `${id}:\uffff`));
     });
   }
+  // Call only inside the cross-tab write lock. Deletion and selection changes
+  // commit together, so a failed reset never leaves a half-cleared project.
+  retainSelection(ids, encrypted, signal, undoIds = []) {
+    const keep = new Set([...ids, ...undoIds]);
+    return transaction(this.db, ['meta', 'clips', 'chunks'], 'readwrite', tx => {
+      tx.objectStore('meta').put(encrypted, 'edit-selection');
+      if (!keep.size) {
+        tx.objectStore('clips').clear();
+        tx.objectStore('chunks').clear();
+        return;
+      }
+      for (const name of ['clips', 'chunks']) {
+        const store = tx.objectStore(name);
+        store.openKeyCursor().onsuccess = event => {
+          const cursor = event.target.result;
+          if (!cursor) return;
+          const id = name === 'clips' ? cursor.key : String(cursor.key).split(':')[0];
+          if (!keep.has(id)) store.delete(cursor.key);
+          cursor.continue();
+        };
+      }
+    }, signal);
+  }
+  // A removed clip can briefly support Undo in this page. Lock drops that
+  // opportunity and deletes only its copy; unlock also cleans it after a crash.
+  discardUndo(ids) {
+    return this.exclusive(undefined, () => transaction(this.db, ['clips', 'chunks'], 'readwrite', tx => {
+      for (const id of ids) {
+        tx.objectStore('clips').delete(id);
+        tx.objectStore('chunks').delete(IDBKeyRange.bound(`${id}:`, `${id}:\uffff`));
+      }
+    }));
+  }
   async selection(fallback, signal) {
     this.assertUnlocked(signal);
     const record = await read(this.db, 'meta', 'edit-selection', signal);
     this.assertUnlocked(signal);
     if (!record) return [...fallback]; // Preserve the existing edit when upgrading.
-    const ids = JSON.parse(decoder.decode(await unseal(this.key, record, 'edit-selection')));
+    const ids = await selectionIds(this.key, record);
     this.assertUnlocked(signal);
-    if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string')) throw new Error('Your saved selection could not be read.');
-    return [...new Set(ids)];
+    return ids;
   }
-  async select(ids, signal) {
+  async select(ids, signal, { undoIds = [] } = {}) {
     this.assertUnlocked(signal);
     return this.exclusive(signal, async () => {
       this.assertUnlocked(signal);
       const encrypted = await seal(this.key, encoder.encode(JSON.stringify([...new Set(ids)])), 'edit-selection');
       this.assertUnlocked(signal);
-      await put(this.db, 'meta', 'edit-selection', encrypted, signal);
+      await this.retainSelection(ids, encrypted, signal, undoIds);
     });
   }
   async importFile(file, info, { signal, selectedIds, onProgress = () => {} } = {}) {

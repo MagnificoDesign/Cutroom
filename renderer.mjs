@@ -4,9 +4,11 @@ import {
   canEncodeVideo, canEncodeAudio
 } from './mediabunny.mjs?v=6';
 import { check } from './vault.mjs?v=6';
-import { validatePlan } from './planner.mjs?v=6';
+import { validatePlan } from './planner.mjs?v=9';
 import { FRAME_RATE, SAMPLE_RATE, outputSize, renderTimeline, placeAudio, finishAudio } from './render-core.mjs?v=6';
-import { guarded } from './media.mjs?v=6';
+import { guarded } from './media.mjs?v=8';
+import { canSmoothJoin, prepareBridge } from './transitions.mjs?v=9';
+import { interpolateFrame } from './transition-core.mjs?v=9';
 
 export async function selectFormat(size) {
   if (typeof VideoEncoder === 'undefined' || typeof AudioEncoder === 'undefined') {
@@ -64,7 +66,7 @@ export async function verifyExport(blob, expectedDuration, expectedSound, signal
   }
 }
 
-export async function renderEdit({ clips, segments, getBlob, signal, onProgress = () => {} }) {
+export async function renderEdit({ clips, segments, plan, getBlob, signal, onProgress = () => {} }) {
   validatePlan(clips, segments);
   const timeline = renderTimeline(segments);
   const total = timeline.reduce((sum, part) => sum + part.duration, 0);
@@ -89,7 +91,8 @@ export async function renderEdit({ clips, segments, getBlob, signal, onProgress 
   // their timestamps to a fixed cadence; that can duplicate timestamps.
   output.addVideoTrack(videoSource);
   output.addAudioTrack(audioSource);
-  let currentInput = null, sourcePeak = 0, withAudio = 0, completed = false;
+  let currentInput = null, sourcePeak = 0, withAudio = 0, completed = false, incoming = null, outgoing = null;
+  const smoothedJoins = [];
   const abort = () => { currentInput?.dispose(); void output.cancel().catch(() => {}); };
   signal?.addEventListener('abort', abort, { once: true });
   try {
@@ -97,6 +100,13 @@ export async function renderEdit({ clips, segments, getBlob, signal, onProgress 
     for (let index = 0; index < timeline.length; index++) {
       check(signal);
       const part = timeline[index], clip = byId.get(part.id);
+      outgoing = null;
+      if (canSmoothJoin(clips, timeline, index, plan)) {
+        onProgress({ stage: `Smoothing connection ${index + 1} of ${timeline.length - 1}…`, fraction: part.outputStart / total * .92 });
+        outgoing = await prepareBridge({ clipA: clip, clipB: byId.get(timeline[index + 1].id), partA: part, partB: timeline[index + 1], size, getBlob, signal });
+        check(signal);
+        if (outgoing) smoothedJoins.push({ index, start: outgoing.start, end: outgoing.end, frames: outgoing.left + outgoing.right });
+      }
       onProgress({ stage: `Making video ${index + 1} of ${timeline.length}…`, fraction: part.outputStart / total * .92 });
       const blob = await getBlob(clip, signal);
       check(signal);
@@ -117,6 +127,15 @@ export async function renderEdit({ clips, segments, getBlob, signal, onProgress 
         if (next.done || !next.value) throw new Error(`A frame in “${clip.name}” could not be read.`);
         context.fillStyle = '#000'; context.fillRect(0, 0, size.width, size.height);
         context.drawImage(next.value.canvas, 0, 0);
+        const time = part.outputStart + frame / FRAME_RATE;
+        const bridge = incoming && time > incoming.start + .00001 && time < incoming.end - .00001 ? incoming
+          : outgoing && time > outgoing.start + .00001 && time < outgoing.end - .00001 ? outgoing : null;
+        if (bridge) {
+          const image = await interpolateFrame(bridge, bridge.a, bridge.b, (time - bridge.start) / (bridge.end - bridge.start), signal);
+          check(signal);
+          context.putImageData(new ImageData(image.data, image.width, image.height), 0, 0);
+        }
+        if (incoming && time >= incoming.end - .00001) incoming = null;
         await guarded(videoSource.add(part.outputStart + frame / FRAME_RATE, Math.min(1 / FRAME_RATE, part.duration - frame / FRAME_RATE), { keyFrame: frame === 0 }), signal);
         if (frame % 12 === 0) {
           onProgress({ stage: `Making video ${index + 1} of ${timeline.length}…`, fraction: (part.outputStart + frame / FRAME_RATE) / total * .92 });
@@ -141,6 +160,7 @@ export async function renderEdit({ clips, segments, getBlob, signal, onProgress 
       for (let c = 0; c < 2; c++) buffer.copyToChannel(channels[c], c);
       await guarded(audioSource.add(buffer), signal);
       currentInput.dispose(); currentInput = null;
+      incoming = outgoing; outgoing = null;
     }
     check(signal);
     onProgress({ stage: 'Finishing your video…', fraction: .93 });
@@ -151,10 +171,11 @@ export async function renderEdit({ clips, segments, getBlob, signal, onProgress 
     onProgress({ stage: 'Checking picture and audio…', fraction: .97 });
     const verified = await verifyExport(blob, total, sourcePeak > .001, signal);
     check(signal);
-    return { blob, extension: format.extension, ...size, duration: verified.duration, withAudio, timeline, videoCodec: format.video, audioCodec: format.audio };
+    return { blob, extension: format.extension, ...size, duration: verified.duration, withAudio, timeline, smoothedJoins, videoCodec: format.video, audioCodec: format.audio };
   } finally {
     signal?.removeEventListener('abort', abort);
     currentInput?.dispose();
+    incoming = outgoing = null;
     if (!completed) await output.cancel().catch(() => {});
     canvas.width = 1; canvas.height = 1;
   }

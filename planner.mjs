@@ -1,4 +1,6 @@
 import { clamp, frameSimilarity, motion } from './core.mjs?v=6';
+import { soundAllowsCut, pauseCandidates } from './audio-cuts.mjs?v=8';
+import { predictPicture } from './motion.mjs?v=9';
 
 const minimumKeep = clip => Math.min(clip.duration, Math.max(.5, clip.duration * .45));
 const closest = (frames, time) => frames.reduce((best, frame) => Math.abs(frame.t - time) < Math.abs(best.t - time) ? frame : best, frames[0]);
@@ -44,16 +46,22 @@ export function flow(a, b) {
 function signature(clip, time, side) {
   const frames = clip.samples || [];
   if (!frames.length) return { frame: null, vector: { x: 0, y: 0, confidence: 0 } };
-  const frame = closest(frames, Math.min(time, clip.duration));
+  // A cut timestamp is an exclusive end: score the last displayed source frame.
+  const before = side === 'out' ? frames.filter(f => f.duration > 0 && f.timestamp < time - .00001).at(-1) : null;
+  const frame = before && time - before.timestamp < .08 ? before : closest(frames, Math.min(time, clip.duration));
   let window = frames.filter(f => side === 'out' ? f.t <= time + .001 && f.t >= time - .65 : f.t >= time - .001 && f.t <= time + .65);
   if (window.length < 2) window = frames.slice(Math.max(0, frames.indexOf(frame) - 1), frames.indexOf(frame) + 2);
-  const vector = flow(window[0], window.at(-1));
+  let vector = flow(window[0], window.at(-1));
+  const tracked = side === 'out' ? frame.inMotion : frame.outMotion;
+  if (tracked?.confidence > .55) vector = tracked;
   if (!window[0]?.gray) {
     const fallback = motion(window);
     vector.x = fallback.dx / Math.max(.01, (window.at(-1)?.t || 0) - (window[0]?.t || 0));
     vector.confidence = fallback.confidence;
   }
-  return { frame, vector };
+  const gap = Math.max(.012, time - (frame.timestamp ?? frame.t));
+  const prediction = side === 'out' ? Math.abs(gap - 1 / 30) < .009 ? frame.nextPicture || predictPicture(frame, frame.inField, gap) : predictPicture(frame, frame.inField, gap) : null;
+  return { frame, vector, prediction };
 }
 
 export function boundaryCost(out, entry) {
@@ -69,7 +77,29 @@ export function boundaryCost(out, entry) {
       mismatch = .72 * (1 - cosine) / 2 + .28 * Math.abs(sa - sb) / Math.max(sa, sb);
     }
   }
-  return { cost: .58 * (1 - similarity) + .42 * mismatch, similarity, mismatch };
+  // When the subject has its own motion, also check the camera trajectory.
+  // A matching small subject must not excuse an abrupt reversed camera pan.
+  if ((a.local || b.local) && a.camera && b.camera && a.confidence > .55 && b.confidence > .55) {
+    const ca = Math.hypot(a.camera.x, a.camera.y), cb = Math.hypot(b.camera.x, b.camera.y);
+    if (ca > .025 && cb > .025) {
+      const cameraMismatch = (1 - clamp((a.camera.x * b.camera.x + a.camera.y * b.camera.y) / (ca * cb), -1, 1)) / 2;
+      mismatch = Math.max(mismatch, cameraMismatch * .8);
+    }
+  }
+  let continuation = .12;
+  if (out.prediction && entry.frame?.gray) {
+    const blocks = new Float32Array(48);
+    let total = 0;
+    for (let i = 0; i < out.prediction.length; i++) {
+      const error = Math.abs(out.prediction[i] - out.frame.mean - (entry.frame.gray[i] - entry.frame.mean));
+      total += error; blocks[Math.floor(Math.floor(i / 32) / 3) * 8 + Math.floor(i % 32 / 4)] += error / 12;
+    }
+    const worst = [...blocks].sort((a, b) => b - a).slice(0, 6).reduce((sum, value) => sum + value, 0) / 6;
+    continuation = clamp((.55 * total / out.prediction.length + .45 * worst) * 4);
+  }
+  // Prefer the next natural pose over replaying an identical still. This small
+  // reward cannot, by itself, authorize removing an otherwise uncertain span.
+  return { cost: .58 * (1 - similarity) + .42 * mismatch + .24 * (continuation - .12), similarity, mismatch, continuation };
 }
 
 function times(clip, side) {
@@ -80,8 +110,8 @@ function times(clip, side) {
     if (side === 'out' && frame.t >= keep && frame.t < clip.duration - .04) all.push(frame.t);
   }
   all.sort((a, b) => a - b);
-  const coarse = all.length <= 10 ? all : Array.from(new Set(Array.from({ length: 10 }, (_, i) => all[Math.round(i * (all.length - 1) / 9)])));
-  return [...new Set([...coarse, ...(side === 'in' ? clip.fineIn || [] : clip.fineOut || [])])].sort((a, b) => a - b);
+  const coarse = all.length <= 16 ? all : Array.from(new Set(Array.from({ length: 16 }, (_, i) => all[Math.round(i * (all.length - 1) / 15)])));
+  return [...new Set([...coarse, ...pauseCandidates(clip, side), ...(side === 'in' ? clip.fineIn || [] : clip.fineOut || [])])].sort((a, b) => a - b);
 }
 
 export function validatePlan(clips, plan) {
@@ -96,7 +126,7 @@ export function validatePlan(clips, plan) {
   return plan;
 }
 
-export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImprovement = .06, verified = [], reviewed = [] } = {}) {
+function* planningSteps(clips, { beamWidth = 160, trimPenalty = .22, minimumImprovement = .06, verified = [], reviewed = [] } = {}) {
   if (!clips.length || clips.some(clip => !(clip.duration > 0) || !Number.isFinite(clip.duration))) throw new Error('Add readable videos before creating an edit.');
   if (clips.length > 12) throw new Error('For this version, choose up to 12 videos for one edit.');
   const full = clips.map(clip => ({ id: clip.id, start: 0, end: clip.duration }));
@@ -115,6 +145,7 @@ export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImp
     const natural = boundaryCost(sig(a, clips[a].duration, 'out'), sig(b, 0, 'in'));
     const options = [];
     for (const end of protectedIds.has(clips[a].id) ? [clips[a].duration] : times(clips[a], 'out')) for (const start of protectedIds.has(clips[b].id) ? [0] : times(clips[b], 'in')) {
+      if (!soundAllowsCut(clips[a], end, 'out') || !soundAllowsCut(clips[b], start, 'in')) continue;
       const score = boundaryCost(sig(a, end, 'out'), sig(b, start, 'in'));
       const trimmed = end < clips[a].duration - .001 || start > .001;
       // Weak, blank or opposite-motion matches cannot justify throwing away time.
@@ -133,6 +164,7 @@ export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImp
       candidates.push({ ...seam, overlap: true, cost: seam.cost - 2 });
     }
     joins.set(`${a}/${b}`, candidates);
+    yield;
   }
   let baselineCost = 0;
   for (let i = 0; i + 1 < clips.length; i++) baselineCost += boundaryCost(sig(i, clips[i].duration, 'out'), sig(i + 1, 0, 'in')).cost;
@@ -150,10 +182,28 @@ export function planEdit(clips, { beamWidth = 160, trimPenalty = .22, minimumImp
       }
     }
     beam = [...next.values()].sort((a, b) => a.cost - b.cost).slice(0, beamWidth);
+    yield;
   }
   const best = beam.sort((a, b) => a.cost - b.cost)[0];
   if (!best || best.cost >= baselineCost - minimumImprovement) return { segments: full, baselineCost, cost: baselineCost, improved: false, joins: [], reviewed };
   const segments = [...best.done, { id: clips[best.last].id, start: best.start, end: clips[best.last].duration }];
   validatePlan(clips, segments);
   return { segments, cost: best.cost, baselineCost, improved: true, joins: best.joins, reviewed };
+}
+
+export function planEdit(clips, options) {
+  const steps = planningSteps(clips, options);
+  let result = steps.next();
+  while (!result.done) result = steps.next();
+  return result.value;
+}
+
+export async function planEditAsync(clips, options, signal) {
+  const steps = planningSteps(clips, options);
+  while (true) {
+    signal?.throwIfAborted();
+    const result = steps.next();
+    if (result.done) return result.value;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
 }

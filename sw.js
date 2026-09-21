@@ -1,5 +1,5 @@
-const CACHE = 'cutroom-v6';
-const ASSETS = ['./', './index.html', './styles.css?v=6', './app.js?v=6', './vault.mjs?v=6', './media.mjs?v=6', './core.mjs?v=6', './planner.mjs?v=6', './overlap.mjs?v=6', './analyze.mjs?v=6', './render-core.mjs?v=6', './renderer.mjs?v=6', './mediabunny.mjs?v=6', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const CACHE = 'cutroom-v10';
+const ASSETS = ['./', './index.html', './styles.css?v=8', './app.js?v=10', './vault.mjs?v=10', './vault.mjs?v=6', './media.mjs?v=8', './core.mjs?v=6', './planner.mjs?v=9', './audio-cuts.mjs?v=8', './motion.mjs?v=9', './transition-core.mjs?v=9', './transitions.mjs?v=9', './overlap.mjs?v=6', './analyze.mjs?v=9', './render-core.mjs?v=6', './renderer.mjs?v=9', './mediabunny.mjs?v=6', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 const urls = new Set(ASSETS.map(path => new URL(path, self.registration.scope).href));
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));

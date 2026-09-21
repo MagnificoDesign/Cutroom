@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planEdit, validatePlan, boundaryCost, flow } from './planner.mjs';
+import { planEdit, planEditAsync, validatePlan, boundaryCost, flow } from './planner.mjs';
 import { makePlan } from './core.mjs';
 
 const frame = (t, shape = 0, blank = false) => ({ t, mean: blank ? 0 : .4, variance: blank ? 0 : .05, black: blank ? 1 : 0, white: 0, tile: Array.from({ length: 48 }, (_, i) => blank ? 0 : (Math.sin(i * 9.17 + shape * 33.13) * 10000) % 1 * .4 + .5), edge: Array(48).fill(blank ? 0 : .08) });
@@ -60,4 +60,12 @@ test('sparse overlap candidates never silently discard unique leading material',
 test('invalid, duplicate, omitted and out-of-range segments are rejected', () => {
   const clips = [{ id: 'a', duration: 4 }];
   for (const plan of [[], [{ id: 'a', start: 3, end: 2 }], [{ id: 'a', start: -1, end: 2 }], [{ id: 'a', start: 0, end: 5 }], [{ id: 'b', start: 0, end: 4 }]]) assert.throws(() => validatePlan(clips, plan));
+});
+
+test('the cooperative planner preserves the joint result and cancels between search batches', async () => {
+  const clips = Array.from({ length: 6 }, (_, i) => clip(String(i), t => t < 1 ? i : t < 2.75 ? i + 1 : i + 2));
+  assert.deepEqual(await planEditAsync(clips), planEdit(clips));
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('Stopped', 'AbortError')), 0);
+  await assert.rejects(planEditAsync(clips, {}, controller.signal), { name: 'AbortError' });
 });

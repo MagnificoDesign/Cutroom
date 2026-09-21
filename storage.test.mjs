@@ -163,22 +163,100 @@ test('deletion removes only the selected clip and all its chunks', async t => {
   assert.deepEqual(await vault.unlock(password), [keep]);
 });
 
-test('a fresh encrypted selection survives locking without deleting previous imports', async t => {
+test('a new video deletes every clip and chunk while retaining the password and an empty encrypted selection', async t => {
   const vault = await fresh(t);
-  const old = await vault.importFile(video(), info);
+  const old = await vault.importFile(video(CHUNK_SIZE + 1), info);
+  await vault.importFile(video(), info);
+  const header = await read(vault.db, 'meta', 'header');
   assert.deepEqual(await vault.selection([old.id]), [old.id]);
   await vault.select([]);
   const record = await read(vault.db, 'meta', 'edit-selection');
   assert(record.data instanceof ArrayBuffer);
   assert.equal(record.ids, undefined);
+  assert.deepEqual(await counts(vault), { clips: 0, chunks: 0 });
+  assert.deepEqual(await read(vault.db, 'meta', 'header'), header);
   vault.lock();
-  assert.deepEqual(await vault.unlock(password), [old]);
+  assert.deepEqual(await vault.unlock(password), []);
   assert.deepEqual(await vault.selection([old.id]), []);
   const next = await vault.importFile(video(25, 'new.mp4'), info, { selectedIds: [] });
   assert.deepEqual(await vault.selection([]), [next.id]);
-  await vault.select([old.id, next.id]);
-  assert.deepEqual(await vault.selection([]), [old.id, next.id]);
-  assert.deepEqual(await counts(vault), { clips: 2, chunks: 2 });
+  assert.deepEqual(await counts(vault), { clips: 1, chunks: 1 });
+  vault.lock();
+  assert.deepEqual(await vault.unlock(password), [next]);
+});
+
+test('upgrade deletes archived imports before reading their metadata and preserves the active edit', async t => {
+  const vault = await fresh(t);
+  const archive = await vault.importFile(video(CHUNK_SIZE + 1, 'archived.mp4'), info);
+  const current = await vault.importFile(video(37, 'current.mp4'), info);
+  const selected = await seal(vault.key, new TextEncoder().encode(JSON.stringify([current.id])), 'edit-selection');
+  await write(vault, 'meta', 'edit-selection', selected); // A v0.7–v0.9 archive.
+  await write(vault, 'clips', archive.id, { brokenOldMetadata: true });
+  vault.lock();
+  await assert.rejects(vault.unlock('incorrect password'), /doesn't unlock/);
+  assert.deepEqual(await counts(vault), { clips: 2, chunks: 3 });
+  assert.deepEqual(await vault.unlock(password), [current]);
+  assert.deepEqual(await counts(vault), { clips: 1, chunks: 1 });
+  assert.deepEqual(await vault.selection([]), [current.id]);
+  assert.equal((await vault.blob(current)).size, 37);
+});
+
+test('upgrade with an empty active selection removes the entire old archive', async t => {
+  const vault = await fresh(t);
+  await vault.importFile(video(CHUNK_SIZE + 1), info);
+  await write(vault, 'meta', 'edit-selection', await seal(vault.key, new TextEncoder().encode('[]'), 'edit-selection'));
+  vault.lock();
+  assert.deepEqual(await vault.unlock(password), []);
+  assert.deepEqual(await counts(vault), { clips: 0, chunks: 0 });
+});
+
+test('Undo only keeps the latest removed copy and restores order, while lock discards that copy', async t => {
+  const vault = await fresh(t);
+  const a = await vault.importFile(video(21, 'a.mp4'), info);
+  const b = await vault.importFile(video(CHUNK_SIZE + 1, 'b.mp4'), info);
+  const c = await vault.importFile(video(23, 'c.mp4'), info);
+  await vault.select([a.id, c.id], undefined, { undoIds: [a.id, b.id, c.id] });
+  assert.deepEqual(await vault.selection([]), [a.id, c.id]);
+  assert.deepEqual(await counts(vault), { clips: 3, chunks: 4 });
+  await vault.select([a.id, b.id, c.id]); // Undo.
+  assert.deepEqual(await vault.selection([]), [a.id, b.id, c.id]);
+  await vault.select([a.id, c.id], undefined, { undoIds: [a.id, b.id, c.id] });
+  await vault.select([a.id], undefined, { undoIds: [a.id, c.id] });
+  assert.deepEqual(await counts(vault), { clips: 2, chunks: 2 }); // b is gone.
+  vault.lock();
+  await vault.discardUndo([c.id]);
+  assert.deepEqual(await counts(vault), { clips: 1, chunks: 1 });
+  assert.deepEqual(await vault.unlock(password), [a]);
+});
+
+test('reload cleans a removed copy even when background cleanup did not run', async t => {
+  const vault = await fresh(t);
+  const a = await vault.importFile(video(), info);
+  const b = await vault.importFile(video(CHUNK_SIZE + 1), info);
+  await vault.select([a.id], undefined, { undoIds: [a.id, b.id] });
+  vault.lock(); // Simulate a page being terminated before discardUndo runs.
+  assert.deepEqual(await vault.unlock(password), [a]);
+  assert.deepEqual(await counts(vault), { clips: 1, chunks: 1 });
+});
+
+test('a failed or cancelled new-video reset rolls back deletion and selection together', async t => {
+  const vault = await fresh(t);
+  const clip = await vault.importFile(video(CHUNK_SIZE + 1), info, { selectedIds: [] });
+  const original = IDBObjectStore.prototype.clear;
+  for (const cancel of [false, true]) {
+    const controller = new AbortController();
+    IDBObjectStore.prototype.clear = function (...args) {
+      if (this.name === 'chunks' && !cancel) throw new DOMException('Synthetic storage failure', 'UnknownError');
+      const request = original.apply(this, args);
+      if (this.name === 'clips' && cancel) request.addEventListener('success', () => controller.abort());
+      return request;
+    };
+    try { await assert.rejects(vault.select([], controller.signal), { name: cancel ? 'AbortError' : 'UnknownError' }); }
+    finally { IDBObjectStore.prototype.clear = original; }
+    assert.deepEqual(await vault.selection([]), [clip.id]);
+    assert.deepEqual(await counts(vault), { clips: 1, chunks: 2 });
+    assert.equal((await vault.blob(clip)).size, CHUNK_SIZE + 1);
+  }
 });
 
 test('selection and import metadata commit atomically on a storage failure', async t => {

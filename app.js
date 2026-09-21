@@ -1,11 +1,13 @@
-import { openVault, check } from './vault.mjs?v=6';
-import { probe, sample } from './media.mjs?v=6';
-import { analyzeJoins } from './analyze.mjs?v=6';
-import { renderEdit } from './renderer.mjs?v=6';
+import { openVault, check } from './vault.mjs?v=10';
+import { probe, sample, thumbnail } from './media.mjs?v=8';
+import { analyzeJoins } from './analyze.mjs?v=9';
+import { renderEdit } from './renderer.mjs?v=9';
 
 const $ = selector => document.querySelector(selector);
-const state = { clips: [], saved: [], analyses: new Map(), plan: null, result: null, busy: false, progress: 0, message: '', failures: [], screen: 'studio' };
+const state = { clips: [], saved: [], analyses: new Map(), plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio' };
 let vault, session = new AbortController(), unlocking = false, picker = null, creating = null;
+const thumbnails = new Map();
+let thumbnailJob = null, clipPreview = null, joinPreview = null;
 const fileInput = document.createElement('input');
 fileInput.type = 'file';
 fileInput.accept = 'video/*';
@@ -15,8 +17,14 @@ fileInput.id = 'file';
 document.body.append(fileInput);
 
 const esc = (text = '') => String(text).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+const playIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
 const active = signal => signal === session.signal && !signal.aborted;
 function clearPlan() {
+  stopJoinPreview(true);
+  closeClipPreview(false);
+  clearThumbnails();
+  const video = $('#finished');
+  if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
   if (state.result?.url) URL.revokeObjectURL(state.result.url);
   state.result = null;
   state.analyses.clear(); state.plan = null; state.screen = 'studio';
@@ -26,6 +34,144 @@ function explain(error) {
   if (error?.name === 'OperationError') return 'This video could not be encrypted. Retry it while Cutroom stays open.';
   if (error?.name === 'NotReadableError') return 'The original video could not be read. Make sure it has finished downloading in Photos or Files.';
   return error?.message || 'This video could not be added. Please try again.';
+}
+
+function stopThumbnailWork() {
+  thumbnailJob?.abort();
+  thumbnailJob = null;
+}
+function clearThumbnails() {
+  stopThumbnailWork();
+  for (const url of thumbnails.values()) if (url) URL.revokeObjectURL(url);
+  thumbnails.clear();
+}
+function queueThumbnails() {
+  if (!vault?.key || state.busy || state.screen !== 'studio' || clipPreview || thumbnailJob) return;
+  const clips = state.clips.slice(0, 12).filter(clip => !thumbnails.has(clip.id));
+  if (!clips.length) return;
+  const parent = session.signal, job = new AbortController(), signal = job.signal;
+  const abort = () => job.abort(parent.reason);
+  parent.addEventListener('abort', abort, { once: true });
+  thumbnailJob = job;
+  void (async () => {
+    try {
+      // One source at a time. Only tiny image URLs remain between iterations.
+      for (const clip of clips) {
+        check(signal);
+        try {
+          const picture = await thumbnail(await vault.blob(clip, signal), signal);
+          check(signal);
+          if (!active(parent) || state.busy || state.screen !== 'studio' || !state.clips.some(item => item.id === clip.id)) return;
+          const url = URL.createObjectURL(picture);
+          thumbnails.set(clip.id, url);
+          const slot = document.querySelector(`[data-thumbnail="${clip.id}"]`);
+          if (slot) {
+            const image = document.createElement('img'); image.src = url; image.alt = '';
+            slot.prepend(image);
+          }
+        } catch (error) {
+          check(signal);
+          thumbnails.set(clip.id, null); // Preview remains available if a poster cannot be made.
+        }
+      }
+    } catch { /* Cancellation cannot put media back into the locked UI. */ }
+    finally {
+      parent.removeEventListener('abort', abort);
+      if (thumbnailJob === job) thumbnailJob = null;
+    }
+  })();
+}
+
+function closeClipPreview(resume = true) {
+  const preview = clipPreview;
+  if (!preview) return;
+  clipPreview = null;
+  preview.parent.removeEventListener('abort', preview.abort);
+  preview.job.abort();
+  preview.video.onloadedmetadata = preview.video.onerror = null;
+  preview.video.pause(); preview.video.removeAttribute('src'); preview.video.load();
+  if (preview.url) URL.revokeObjectURL(preview.url);
+  preview.dialog.close(); preview.dialog.remove();
+  if (resume && vault?.key) {
+    if (preview.focus?.isConnected) preview.focus.focus();
+    queueThumbnails();
+  }
+}
+async function openClipPreview(id) {
+  if (state.busy || !vault.key || state.screen !== 'studio') return;
+  const clip = state.clips.find(clip => clip.id === id);
+  if (!clip) return;
+  closeClipPreview(false); stopThumbnailWork();
+  const parent = session.signal, job = new AbortController();
+  const dialog = document.createElement('dialog');
+  dialog.className = 'clip-dialog'; dialog.setAttribute('aria-labelledby', 'clip-preview-title');
+  dialog.innerHTML = `<div class="dialog-actions"><button id="preview-lock" class="ghost">Lock</button><button id="preview-close" class="ghost" aria-label="Close clip preview">Done</button></div><h2 id="clip-preview-title">${esc(clip.name)}</h2><p class="preview-status" role="status">Opening your video…</p><video class="source-preview" controls playsinline preload="metadata" aria-label="Clip preview" hidden></video>`;
+  const preview = { parent, job, dialog, video: dialog.querySelector('video'), url: null, focus: document.activeElement, abort: () => closeClipPreview(false) };
+  clipPreview = preview;
+  parent.addEventListener('abort', preview.abort, { once: true });
+  dialog.querySelector('#preview-close').onclick = () => closeClipPreview();
+  dialog.querySelector('#preview-lock').onclick = lock;
+  dialog.addEventListener('cancel', event => { event.preventDefault(); closeClipPreview(); });
+  document.body.append(dialog); dialog.showModal();
+  try {
+    const blob = await vault.blob(clip, job.signal);
+    check(job.signal);
+    if (!active(parent) || clipPreview !== preview) return;
+    preview.url = URL.createObjectURL(blob);
+    preview.video.onloadedmetadata = () => { dialog.querySelector('.preview-status').hidden = true; };
+    preview.video.onerror = () => {
+      if (clipPreview !== preview) return;
+      const status = dialog.querySelector('.preview-status');
+      status.hidden = false; status.textContent = 'This preview could not be played. Close it and try again.';
+    };
+    preview.video.src = preview.url; preview.video.hidden = false;
+  } catch (error) {
+    if (active(parent) && !job.signal.aborted && clipPreview === preview) dialog.querySelector('.preview-status').textContent = 'This preview could not be opened. Close it and try again.';
+  }
+}
+
+function stopJoinPreview(pause = false) {
+  if (!joinPreview) return;
+  const preview = joinPreview; joinPreview = null;
+  cancelAnimationFrame(preview.frame);
+  preview.video.removeEventListener('pause', preview.paused);
+  preview.video.removeEventListener('seeking', preview.seeking);
+  if (pause) preview.video.pause();
+}
+function playJoin(index) {
+  const video = $('#finished'), timeline = state.result?.timeline;
+  if (!video || !timeline?.[index + 1]) return;
+  stopJoinPreview(true);
+  const at = timeline[index + 1].outputStart;
+  const start = Math.max(timeline[index].outputStart, at - 2);
+  const end = Math.min(at + timeline[index + 1].duration, at + 2);
+  const status = $('#join-status');
+  const preview = { video, frame: 0, paused: () => { if (video.paused) stopJoinPreview(); }, seeking: () => {
+    if (video.currentTime < start - .1 || video.currentTime > end + .1) stopJoinPreview();
+  } };
+  joinPreview = preview;
+  const tick = () => {
+    if (joinPreview !== preview) return;
+    if (video.currentTime >= end - .015 || video.ended) {
+      stopJoinPreview(true); status.textContent = `Join ${index + 1} preview finished.`; return;
+    }
+    preview.frame = requestAnimationFrame(tick);
+  };
+  video.currentTime = start;
+  video.addEventListener('pause', preview.paused);
+  video.addEventListener('seeking', preview.seeking);
+  status.textContent = `Playing join ${index + 1} with the finished video's sound.`;
+  void video.play().then(() => { if (joinPreview === preview) tick(); }).catch(() => {
+    if (joinPreview === preview) { stopJoinPreview(); status.textContent = 'Tap Play on the video to watch this join.'; }
+  });
+  video.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function editTheseClips() {
+  if (state.busy || !vault.key) return;
+  clearPlan();
+  state.message = ''; state.undo = null;
+  render(); window.scrollTo({ top: 0, behavior: 'instant' });
 }
 
 async function login(password) {
@@ -60,6 +206,9 @@ async function add(files) {
   clearPlan();
   let imported = 0;
   try {
+    await vault.select(state.clips.map(clip => clip.id), signal);
+    check(signal);
+    state.saved = [...state.clips]; state.undo = null;
     for (let index = 0; index < files.length; index++) {
       check(signal);
       const file = files[index];
@@ -142,6 +291,9 @@ async function create({ keepFull = false } = {}) {
   state.progress = 0;
   let wakeLock;
   try {
+    await vault.select(state.clips.map(clip => clip.id), signal);
+    check(signal);
+    state.saved = [...state.clips]; state.undo = null;
     if (state.clips.length > 12) throw new Error('For this version, choose up to 12 videos for one edit.');
     wakeLock = await navigator.wakeLock?.request('screen').catch(() => null);
     check(signal);
@@ -168,7 +320,7 @@ async function create({ keepFull = false } = {}) {
     check(signal);
     state.plan = plan;
     const result = await renderEdit({
-      clips: state.clips, segments: state.plan.segments, signal,
+      clips: state.clips, segments: state.plan.segments, plan: keepFull ? undefined : state.plan, signal,
       getBlob: (clip, signal) => vault.blob(clip, signal),
       onProgress: ({ stage, fraction }) => {
         check(signal);
@@ -192,22 +344,25 @@ async function create({ keepFull = false } = {}) {
   }
 }
 
-async function chooseClips(ids, { fresh = false } = {}) {
+async function chooseClips(ids, { fresh = false, message = '', undo = null } = {}) {
   if (state.busy || !vault.key) return;
   const signal = session.signal;
   state.busy = true;
   try {
-    await vault.select(ids, signal);
+    await vault.select(ids, signal, { undoIds: undo?.ids || [] });
     check(signal);
     clearPlan();
     const byId = new Map(state.saved.map(clip => [clip.id, clip]));
     state.clips = ids.map(id => byId.get(id)).filter(Boolean);
-    state.failures = [];
-    state.message = '';
+    const keep = new Set([...ids, ...(undo?.ids || [])]);
+    state.saved = state.saved.filter(clip => keep.has(clip.id));
+    if (fresh) state.failures = [];
+    state.message = message;
+    state.undo = undo;
     fileInput.value = '';
     if (fresh) window.scrollTo({ top: 0, behavior: 'instant' });
   } catch (error) {
-    if (active(signal)) state.message = 'Your selection could not be saved. Please try again.';
+    if (active(signal)) state.message = fresh ? 'Your previous videos could not be removed. Please try Create New Video again.' : 'Your selection could not be saved. Please try again.';
   } finally {
     if (active(signal)) { state.busy = false; render(); }
   }
@@ -237,9 +392,13 @@ async function saveResult() {
 }
 
 function lock() {
+  const removed = (state.undo?.ids || []).filter(id => !state.clips.some(clip => clip.id === id));
   session.abort(new DOMException('Cutroom was locked.', 'AbortError'));
   session = new AbortController();
   vault?.lock();
+  // This needs no key. If the browser suspends cleanup, unlock retries before
+  // showing any clips. There is no persistent history or persistent Undo list.
+  if (removed.length) void vault.discardUndo(removed).catch(() => {});
   if (picker?.files) picker.files.length = 0;
   picker = null;
   fileInput.value = '';
@@ -247,14 +406,18 @@ function lock() {
   state.clips = [];
   state.saved = [];
   state.failures = [];
+  state.undo = null;
   state.message = '';
   state.busy = false;
   clearPlan();
   render();
 }
 
-const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.6</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.10</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
 function render() {
+  // A status/error rerender must not leave a detached player or join loop alive.
+  stopJoinPreview(true);
+  $('#finished')?.pause();
   const app = $('#app');
   if (!vault?.key) {
     app.innerHTML = head() + `<section class="panel login"><div class="eyebrow">PRIVATE VIDEO EDITOR</div><h2>Make your clips flow.</h2><p>Unlock once. Add videos. Create.</p><form id="login"><label class="sr-only" for="p">Password</label><input id="p" type="password" autocomplete="current-password" placeholder="Password" required><button id="u" class="primary" type="submit">Unlock Cutroom</button></form><div id="err" class="error" role="alert"></div></section>`;
@@ -268,11 +431,15 @@ function render() {
     const result = state.result;
     const byId = new Map(state.clips.map(clip => [clip.id, clip]));
     const edits = state.plan.segments.map(part => `<li><b>${esc(byId.get(part.id).name)}</b><span>${part.start.toFixed(2)}–${part.end.toFixed(2)} sec of ${byId.get(part.id).duration.toFixed(2)}</span></li>`).join('');
+    const smooth = result.smoothedJoins || [];
     const merged = state.plan.joins?.filter(join => join.kind === 'overlap').length || 0;
-    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p><ol>${edits}</ol><button id="full" class="secondary">Make a version with full clips</button></details></section>`;
+    const joins = result.timeline.slice(1).map((part, index) => `<button class="join-button" data-join="${index}" aria-label="Preview join ${index + 1}"><b>${playIcon} Preview join ${index + 1}</b><span>${part.outputStart.toFixed(2)} sec · ${result.smoothedJoins?.some(join => join.index === index) ? 'Smoothed connection' : state.plan.joins?.[index]?.kind === 'overlap' ? 'Matched overlap' : 'Cut'}</span><small>${esc(byId.get(result.timeline[index].id).name)} → ${esc(byId.get(part.id).name)}</small></button>`).join('');
+    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="edit" class="secondary">Edit These Clips</button><button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : smooth.length ? 'The clip order and timing were kept.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p>${smooth.length ? `<p>${smooth.reduce((sum, join) => sum + join.frames, 0)} in-between frames were created across ${smooth.length} connection${smooth.length === 1 ? '' : 's'} to smooth small movement gaps. Sound keeps its original timing.</p>` : ''}<ol>${edits}</ol>${joins ? `<div class="join-list"><h3>Check the joins</h3><p>Play a few seconds around each connection.</p>${joins}<p id="join-status" role="status"></p></div>` : ''}<button id="full" class="secondary">Make a version with full clips</button></details></section>`;
     $('#save').onclick = saveResult;
     $('#again').onclick = () => chooseClips([], { fresh: true });
+    $('#edit').onclick = editTheseClips;
     $('#full').onclick = () => create({ keepFull: true });
+    app.querySelectorAll('[data-join]').forEach(button => { button.onclick = () => playJoin(Number(button.dataset.join)); });
     const review = app.querySelector('.edit-review');
     if (merged) {
       const note = document.createElement('p');
@@ -285,25 +452,24 @@ function render() {
       review.insertBefore(note, review.querySelector('ol'));
     }
   } else {
-    const clips = state.clips.map((clip, index) => `<div class="clip"><div class="num">${index + 1}</div><div><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></div></div>`).join('');
+    const clips = state.clips.map((clip, index) => `<div class="clip"><button type="button" class="clip-preview" data-preview="${esc(clip.id)}" aria-label="Preview ${esc(clip.name)}" ${state.busy ? 'disabled' : ''}><span class="clip-thumb" data-thumbnail="${esc(clip.id)}">${thumbnails.get(clip.id) ? `<img src="${esc(thumbnails.get(clip.id))}" alt="">` : ''}<span class="thumb-play">${playIcon}</span><span class="num" aria-hidden="true">${index + 1}</span></span><span class="clip-info"><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></span></button><button type="button" class="clip-remove" data-remove="${esc(clip.id)}" aria-label="Remove ${esc(clip.name)} from this video" ${state.busy ? 'disabled' : ''}>Remove</button></div>`).join('');
     const failures = state.failures.length ? `<div class="error" role="alert">${state.failures.map(item => `<p><b>${esc(item.file.name)}</b>: ${esc(item.reason)}</p>`).join('')}</div><button id="retry" class="secondary" ${state.busy ? 'disabled' : ''}>Retry Failed Videos</button>` : '';
-    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Your imported copies are encrypted on this device.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>＋ Add Videos</button><div class="clips">${clips}</div>${state.message ? `<div class="status" role="status">${esc(state.message)}</div>` : ''}${failures}<button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button></section>`;
+    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Your clips are encrypted on this device. Starting a new video removes these copies.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>+ Add Videos</button><div class="clips">${clips}</div>${state.message ? `<div class="status" role="status"><span>${esc(state.message)}</span>${state.undo ? `<button id="undo" class="undo" ${state.busy ? 'disabled' : ''}>Undo Remove</button>` : ''}</div>` : ''}${failures}<button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button></section>`;
     $('#add').onclick = openPicker;
     $('#create').onclick = () => create();
-    if (state.clips.length) {
+    app.querySelectorAll('[data-preview]').forEach(button => { button.onclick = () => openClipPreview(button.dataset.preview); });
+    app.querySelectorAll('[data-remove]').forEach(button => {
+      button.onclick = () => chooseClips(state.clips.filter(clip => clip.id !== button.dataset.remove).map(clip => clip.id), {
+        message: 'Video removed from this edit.', undo: { ids: state.clips.map(clip => clip.id) }
+      });
+    });
+    if ($('#undo')) $('#undo').onclick = () => chooseClips(state.undo.ids, { message: 'Video restored.' });
+    if (state.clips.length || state.undo || state.failures.length) {
       const fresh = document.createElement('button');
       fresh.id = 'new'; fresh.className = 'secondary'; fresh.textContent = 'Create New Video';
       fresh.disabled = state.busy;
       fresh.onclick = () => chooseClips([], { fresh: true });
       app.querySelector('.panel').append(fresh);
-    }
-    const previous = state.saved.filter(clip => !state.clips.some(current => current.id === clip.id));
-    if (previous.length && !state.busy) {
-      const saved = document.createElement('details');
-      saved.className = 'edit-review'; saved.id = 'previous';
-      saved.innerHTML = `<summary>Previous imports · ${previous.length}</summary><p>Your earlier videos are still saved on this device.</p>${previous.map(clip => `<label class="saved-clip"><input type="checkbox" value="${esc(clip.id)}"><span>${esc(clip.name)}<small>${clip.duration.toFixed(1)} sec</small></span></label>`).join('')}<button id="reuse" class="secondary">Add Selected Videos</button>`;
-      app.querySelector('.panel').append(saved);
-      $('#reuse').onclick = () => chooseClips([...state.clips.map(clip => clip.id), ...Array.from(saved.querySelectorAll('input:checked'), input => input.value)]);
     }
     if ($('#retry')) $('#retry').onclick = () => {
       const signal = session.signal;
@@ -312,6 +478,7 @@ function render() {
     };
   }
   $('#lock').onclick = lock;
+  queueThumbnails();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -322,7 +489,7 @@ window.addEventListener('pagehide', lock);
 
 (async () => {
   vault = await openVault();
-  navigator.serviceWorker?.register('./sw.js?v=6', { updateViaCache: 'none' }).catch(() => {});
+  navigator.serviceWorker?.register('./sw.js?v=10', { updateViaCache: 'none' }).catch(() => {});
   render();
 })().catch(() => {
   $('#app').innerHTML = '<div class="error" role="alert">Cutroom could not open local storage. Reopen it in Safari and try again.</div>';
