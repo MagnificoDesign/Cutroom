@@ -1,10 +1,10 @@
-import { openVault, check } from './vault.mjs';
-import { probe, sample } from './media.mjs';
-import { planEdit } from './planner.mjs';
-import { renderEdit } from './renderer.mjs';
+import { openVault, check } from './vault.mjs?v=6';
+import { probe, sample } from './media.mjs?v=6';
+import { analyzeJoins } from './analyze.mjs?v=6';
+import { renderEdit } from './renderer.mjs?v=6';
 
 const $ = selector => document.querySelector(selector);
-const state = { clips: [], analyses: new Map(), plan: null, result: null, busy: false, progress: 0, message: '', failures: [], screen: 'studio' };
+const state = { clips: [], saved: [], analyses: new Map(), plan: null, result: null, busy: false, progress: 0, message: '', failures: [], screen: 'studio' };
 let vault, session = new AbortController(), unlocking = false, picker = null, creating = null;
 const fileInput = document.createElement('input');
 fileInput.type = 'file';
@@ -36,11 +36,14 @@ async function login(password) {
   $('#p').value = '';
   try {
     const clips = await vault.unlock(password, signal);
+    const ids = await vault.selection(clips.map(clip => clip.id), signal);
     check(signal);
-    state.clips = clips;
+    state.saved = clips;
+    const byId = new Map(clips.map(clip => [clip.id, clip]));
+    state.clips = ids.map(id => byId.get(id)).filter(Boolean);
     render();
   } catch (error) {
-    if (active(signal)) $('#err').textContent = explain(error);
+    if (active(signal)) { vault.lock(); $('#err').textContent = explain(error); }
   } finally {
     if (active(signal)) {
       unlocking = false;
@@ -69,6 +72,7 @@ async function add(files) {
         render();
         const clip = await vault.importFile(file, info, {
           signal,
+          selectedIds: state.clips.map(clip => clip.id),
           onProgress: (saved, total) => {
             check(signal);
             state.message = `Encrypting video ${index + 1} of ${files.length} · ${Math.round(saved / total * 100)}%`;
@@ -77,6 +81,7 @@ async function add(files) {
         });
         check(signal);
         state.clips.push(clip);
+        state.saved.push(clip);
         imported++;
       } catch (error) {
         check(signal);
@@ -143,7 +148,7 @@ async function create({ keepFull = false } = {}) {
     for (let index = 0; !keepFull && index < state.clips.length; index++) {
       check(signal);
       state.message = `Analyzing video ${index + 1} of ${state.clips.length}…`;
-      state.progress = index / state.clips.length * .25;
+      state.progress = index / state.clips.length * .2;
       render();
       const clip = state.clips[index];
       const frames = await sample(await vault.blob(clip, signal), signal);
@@ -151,19 +156,23 @@ async function create({ keepFull = false } = {}) {
       state.analyses.set(clip.id, frames);
     }
     state.message = 'Choosing the order and cut points…';
-    state.progress = .25;
+    state.progress = .2;
     render();
     await new Promise(resolve => setTimeout(resolve, 0));
     check(signal);
     const entries = state.clips.map(clip => ({ ...clip, samples: state.analyses.get(clip.id) }));
-    state.plan = keepFull ? { segments: entries.map(clip => ({ id: clip.id, start: 0, end: clip.duration })), improved: false } : planEdit(entries);
+    const plan = keepFull ? { segments: entries.map(clip => ({ id: clip.id, start: 0, end: clip.duration })), improved: false, joins: [], reviewed: [] } : await analyzeJoins({
+      clips: entries, signal, getBlob: (clip, signal) => vault.blob(clip, signal),
+      onProgress: ({ stage, fraction }) => { check(signal); state.message = stage; state.progress = .2 + fraction * .28; render(); }
+    });
     check(signal);
+    state.plan = plan;
     const result = await renderEdit({
       clips: state.clips, segments: state.plan.segments, signal,
       getBlob: (clip, signal) => vault.blob(clip, signal),
       onProgress: ({ stage, fraction }) => {
         check(signal);
-        state.message = stage; state.progress = .25 + fraction * .75;
+        state.message = stage; state.progress = .48 + fraction * .52;
         render();
       }
     });
@@ -180,6 +189,27 @@ async function create({ keepFull = false } = {}) {
     await wakeLock?.release().catch(() => {});
     if (creating === job) creating = null;
     if (active(parent)) { state.busy = false; render(); }
+  }
+}
+
+async function chooseClips(ids, { fresh = false } = {}) {
+  if (state.busy || !vault.key) return;
+  const signal = session.signal;
+  state.busy = true;
+  try {
+    await vault.select(ids, signal);
+    check(signal);
+    clearPlan();
+    const byId = new Map(state.saved.map(clip => [clip.id, clip]));
+    state.clips = ids.map(id => byId.get(id)).filter(Boolean);
+    state.failures = [];
+    state.message = '';
+    fileInput.value = '';
+    if (fresh) window.scrollTo({ top: 0, behavior: 'instant' });
+  } catch (error) {
+    if (active(signal)) state.message = 'Your selection could not be saved. Please try again.';
+  } finally {
+    if (active(signal)) { state.busy = false; render(); }
   }
 }
 
@@ -215,6 +245,7 @@ function lock() {
   fileInput.value = '';
   unlocking = false;
   state.clips = [];
+  state.saved = [];
   state.failures = [];
   state.message = '';
   state.busy = false;
@@ -222,7 +253,7 @@ function lock() {
   render();
 }
 
-const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.5</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.6</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
 function render() {
   const app = $('#app');
   if (!vault?.key) {
@@ -237,16 +268,43 @@ function render() {
     const result = state.result;
     const byId = new Map(state.clips.map(clip => [clip.id, clip]));
     const edits = state.plan.segments.map(part => `<li><b>${esc(byId.get(part.id).name)}</b><span>${part.start.toFixed(2)}–${part.end.toFixed(2)} sec of ${byId.get(part.id).duration.toFixed(2)}</span></li>`).join('');
-    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="again" class="secondary">Make Another</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : 'Full clips were kept because trimming did not improve the visual match enough.'} Your originals are unchanged.</p><ol>${edits}</ol><button id="full" class="secondary">Make a version with full clips</button></details></section>`;
+    const merged = state.plan.joins?.filter(join => join.kind === 'overlap').length || 0;
+    app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()}</p><button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p><ol>${edits}</ol><button id="full" class="secondary">Make a version with full clips</button></details></section>`;
     $('#save').onclick = saveResult;
-    $('#again').onclick = () => { clearPlan(); render(); };
+    $('#again').onclick = () => chooseClips([], { fresh: true });
     $('#full').onclick = () => create({ keepFull: true });
+    const review = app.querySelector('.edit-review');
+    if (merged) {
+      const note = document.createElement('p');
+      note.textContent = `${merged} overlapping join${merged === 1 ? '' : 's'} verified. The shared picture and sound are used once.`;
+      review.insertBefore(note, review.querySelector('ol'));
+    }
+    if (state.plan.reviewed?.length) {
+      const note = document.createElement('p');
+      note.textContent = 'Some similar footage was kept in full because it could not be joined safely.';
+      review.insertBefore(note, review.querySelector('ol'));
+    }
   } else {
     const clips = state.clips.map((clip, index) => `<div class="clip"><div class="num">${index + 1}</div><div><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></div></div>`).join('');
     const failures = state.failures.length ? `<div class="error" role="alert">${state.failures.map(item => `<p><b>${esc(item.file.name)}</b>: ${esc(item.reason)}</p>`).join('')}</div><button id="retry" class="secondary" ${state.busy ? 'disabled' : ''}>Retry Failed Videos</button>` : '';
     app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Your imported copies are encrypted on this device.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>＋ Add Videos</button><div class="clips">${clips}</div>${state.message ? `<div class="status" role="status">${esc(state.message)}</div>` : ''}${failures}<button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button></section>`;
     $('#add').onclick = openPicker;
     $('#create').onclick = () => create();
+    if (state.clips.length) {
+      const fresh = document.createElement('button');
+      fresh.id = 'new'; fresh.className = 'secondary'; fresh.textContent = 'Create New Video';
+      fresh.disabled = state.busy;
+      fresh.onclick = () => chooseClips([], { fresh: true });
+      app.querySelector('.panel').append(fresh);
+    }
+    const previous = state.saved.filter(clip => !state.clips.some(current => current.id === clip.id));
+    if (previous.length && !state.busy) {
+      const saved = document.createElement('details');
+      saved.className = 'edit-review'; saved.id = 'previous';
+      saved.innerHTML = `<summary>Previous imports · ${previous.length}</summary><p>Your earlier videos are still saved on this device.</p>${previous.map(clip => `<label class="saved-clip"><input type="checkbox" value="${esc(clip.id)}"><span>${esc(clip.name)}<small>${clip.duration.toFixed(1)} sec</small></span></label>`).join('')}<button id="reuse" class="secondary">Add Selected Videos</button>`;
+      app.querySelector('.panel').append(saved);
+      $('#reuse').onclick = () => chooseClips([...state.clips.map(clip => clip.id), ...Array.from(saved.querySelectorAll('input:checked'), input => input.value)]);
+    }
     if ($('#retry')) $('#retry').onclick = () => {
       const signal = session.signal;
       const files = state.failures.map(item => item.file);
@@ -264,7 +322,7 @@ window.addEventListener('pagehide', lock);
 
 (async () => {
   vault = await openVault();
-  navigator.serviceWorker?.register('./sw.js').catch(() => {});
+  navigator.serviceWorker?.register('./sw.js?v=6', { updateViaCache: 'none' }).catch(() => {});
   render();
 })().catch(() => {
   $('#app').innerHTML = '<div class="error" role="alert">Cutroom could not open local storage. Reopen it in Safari and try again.</div>';

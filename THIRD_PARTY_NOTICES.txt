@@ -1,4 +1,4 @@
-Cutroom v0.5 includes MediaBunny 1.58.1, by Vanilagy and contributors.
+Cutroom v0.6 includes MediaBunny 1.58.1, by Vanilagy and contributors.
 
 mediabunny.mjs is copied unchanged from the npm package's
 dist/bundles/mediabunny.min.mjs. It runs locally in the user's browser.

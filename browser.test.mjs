@@ -17,6 +17,25 @@ const largeVideo = Buffer.concat([video, Buffer.alloc(12 * 1024 * 1024)]);
 for (const [color, frequency] of [['red', 440], ['lime', 660], ['blue', 880]]) {
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=${color}:size=160x90:rate=30`, '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=44100`, '-t', '2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', resolve(output, `${color}.mp4`)]);
 }
+// One eight-second event, split into overlapping 0–4, 2–6 and 4–8 clips.
+// A visible binary frame number lets an independent decoder prove that the
+// merged result contains each original frame once, without skipped/replayed time.
+const master = resolve(output, 'overlap-master.mp4');
+const raw = Buffer.alloc(240 * 160 * 90 * 3);
+for (let frame = 0; frame < 240; frame++) for (let y = 0; y < 90; y++) for (let x = 0; x < 160; x++) {
+  const at = ((frame * 90 + y) * 160 + x) * 3;
+  let color = [60 + (x * 13 ^ y * 7) % 70, 70 + (x * 3 ^ y * 17) % 55, 60 + (x * 5 ^ y * 11) % 65];
+  const left = 8 + frame * .5, top = 25 + Math.sin(frame / 15) * 7;
+  if (x >= left && x < left + 22 && y >= top && y < top + 19) color = [230, 215, 90];
+  if (y >= 80 && y < 88 && x >= 8 && x < 152) color = Array(3).fill(frame & 1 << Math.floor((x - 8) / 16) ? 225 : 25);
+  for (let c = 0; c < 3; c++) raw[at + c] = color[c];
+}
+execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', '160x90', '-framerate', '30', '-i', 'pipe:0', '-f', 'lavfi', '-i', 'aevalsrc=0.12*sin(2*PI*(220*t+15*t*t))+0.03*sin(2*PI*713*t):s=48000', '-t', '8', '-c:v', 'libx264', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', master], { input: raw });
+// Keep the independently decoded reference immutable across asynchronous runs.
+const masterSound = execFileSync('ffmpeg', ['-v', 'error', '-i', master, '-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-']);
+for (const [name, offset, quality, filter] of [['overlap-a', 0, 19, 'null'], ['overlap-b', 2, 26, 'eq=brightness=0.015:contrast=1.025'], ['overlap-c', 4, 23, 'null']]) {
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-ss', String(offset), '-i', master, '-t', '4', '-vf', filter, '-c:v', 'libx264', '-crf', String(quality), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', resolve(output, `${name}.mp4`)]);
+}
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
   if (path === '/harness') { response.writeHead(200, { 'Content-Type': 'text/html' }); response.end('<!doctype html><title>Cutroom tests</title>'); return; }
@@ -60,6 +79,7 @@ try {
     const browser = await engine.launch(launch);
     console.log(`${name} ${browser.version()}`);
     async function run(title, action) {
+      if (process.env.CUTROOM_TEST_MATCH && !title.includes(process.env.CUTROOM_TEST_MATCH)) return;
       const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
       const page = await context.newPage();
       const errors = [], unexpectedRequests = [];
@@ -298,6 +318,65 @@ try {
       console.log(`Verified export: ${result.extension}, ${result.videoCodec}/${result.audioCodec}, ${result.duration.toFixed(3)} sec`);
     });
 
+    await run('overlap chain renders every unique frame and source sound exactly once', async page => {
+      await page.goto(base + '/harness');
+      const result = await page.evaluate(async () => {
+        const { sample, probe } = await import('/media.mjs');
+        const { analyzeJoins } = await import('/analyze.mjs');
+        const { renderEdit } = await import('/renderer.mjs');
+        const blobs = new Map(), clips = [];
+        for (const id of ['overlap-c', 'overlap-a', 'overlap-b']) {
+          const blob = await (await fetch(`/test-results/${id}.mp4`)).blob();
+          blobs.set(id, blob);
+          clips.push({ id, name: id, ...await probe(blob), samples: await sample(blob) });
+        }
+        const plan = await analyzeJoins({ clips, getBlob: clip => blobs.get(clip.id), signal: new AbortController().signal });
+        if (plan.joins.filter(join => join.kind === 'overlap').length !== 2) {
+          const { coarseCandidates, verifySequence, photoError, verifySound, refineAlignment } = await import('/overlap.mjs');
+          const { inspectMedia } = await import('/media.mjs');
+          const times = Array.from({ length: 120 }, (_, i) => i / 30);
+          const aa = await inspectMedia(blobs.get('overlap-a'), times, undefined, { audioRange: [0, 4] });
+          const bb = await inspectMedia(blobs.get('overlap-b'), times, undefined, { audioRange: [0, 4] });
+          const a = clips.find(clip => clip.id === 'overlap-a'), b = clips.find(clip => clip.id === 'overlap-b');
+          const candidates = coarseCandidates(a, b);
+          return { plan, diagnostics: { durations: clips.map(clip => clip.duration), candidates, evidence: verifySequence(aa.frames, bb.frames, 2, 4, 4), sound: verifySound(aa.audio, bb.audio, 2, 2), refined: candidates.map(candidate => refineAlignment(aa.frames, bb.frames, candidate, 4, 4)), first: [aa.frames[60].timestamp, bb.frames[0].timestamp], photo: photoError(aa.frames[60], bb.frames[0], true), coarseTimes: a.samples.map(frame => frame.t) } };
+        }
+        const result = await renderEdit({ clips, segments: plan.segments, getBlob: clip => blobs.get(clip.id), signal: new AbortController().signal });
+        return { plan, extension: result.extension, bytes: Array.from(new Uint8Array(await result.blob.arrayBuffer())) };
+      });
+      assert.equal(result.plan.joins.filter(join => join.kind === 'overlap').length, 2, JSON.stringify(result));
+      assert.deepEqual(result.plan.segments.map(part => part.id), ['overlap-a', 'overlap-b', 'overlap-c']);
+      assert(Math.abs(result.plan.segments.reduce((sum, part) => sum + part.end - part.start, 0) - 8) < .002);
+      const path = resolve(output, `${name}-merged-overlap.${result.extension}`);
+      await writeFile(path, new Uint8Array(result.bytes));
+      const decoded = execFileSync('ffmpeg', ['-v', 'error', '-xerror', '-i', path, '-an', '-fps_mode', 'passthrough', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'], { maxBuffer: 20 * 1024 * 1024 });
+      assert.equal(decoded.length / (160 * 90 * 3), 240);
+      for (let index = 0; index < 240; index++) {
+        let counter = 0;
+        for (let bit = 0; bit < 9; bit++) {
+          const at = ((index * 90 + 84) * 160 + 16 + bit * 16) * 3;
+          if ((decoded[at] + decoded[at + 1] + decoded[at + 2]) / 3 > 128) counter |= 1 << bit;
+        }
+        assert.equal(counter, index, `Repeated or skipped source picture at output frame ${index}`);
+      }
+      const pcm = execFileSync('ffmpeg', ['-v', 'error', '-i', path, '-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-']);
+      const reference = masterSound;
+      for (let time = .2; time < 7.8; time += .2) {
+        let best = -1;
+        for (let lag = -24; lag <= 24; lag++) {
+          let dot = 0, aa = 0, bb = 0;
+          for (let i = 0; i < 800; i++) {
+            const at = Math.round(time * 8000) + i;
+            const a = reference.readFloatLE(at * 4), b = pcm.readFloatLE((at + lag) * 4);
+            dot += a * b; aa += a * a; bb += b * b;
+          }
+          best = Math.max(best, dot / Math.sqrt(aa * bb));
+        }
+        assert(best > .94, `Repeated, missing or shifted source sound at ${time.toFixed(2)} sec: ${best}`);
+      }
+      console.log('Verified merged overlap: 12 input seconds → 8 unique seconds; all 240 frame numbers and the continuous source soundtrack checked.');
+    });
+
     await run('cancel during encoding keeps clips and blocks stale results', async page => {
       await page.goto(base);
       await unlock(page);
@@ -322,8 +401,20 @@ try {
       await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 30000 });
       const url = await page.locator('#finished').getAttribute('src');
       await page.locator('#again').click();
-      assert.equal(await page.locator('.clip').count(), 1);
+      await page.getByText('Add your videos.', { exact: true }).waitFor();
+      assert.equal(await page.locator('.clip').count(), 0);
       assert.equal(await page.evaluate(async url => { try { await fetch(url); return false; } catch { return true; } }, url), true);
+      assert.equal(await page.locator('#create').isDisabled(), true);
+      assert.equal(await page.locator('#p').count(), 0);
+      await page.screenshot({ path: resolve(output, `${name}-new-video.png`) });
+      await page.reload();
+      await unlock(page);
+      assert.equal(await page.locator('.clip').count(), 0);
+      await page.locator('#previous summary').click();
+      await page.locator('#previous input').check();
+      await page.locator('#reuse').click();
+      await page.locator('.clip').waitFor();
+      assert.equal(await page.locator('.clip b').innerText(), 'cancel-render.mp4');
     });
 
     await run('system share receives the correctly named rendered file', async page => {
@@ -346,7 +437,39 @@ try {
       assert.equal(shared.type, shared.name.endsWith('.mp4') ? 'video/mp4' : 'video/webm');
       assert(shared.size > 1000);
       assert.equal(shared.activation, true);
+      await page.getByRole('button', { name: 'Create New Video', exact: true }).click();
+      await page.getByText('Add your videos.', { exact: true }).waitFor();
+      assert.equal(await page.locator('.clip').count(), 0);
+      await choose(page, [{ name: 'new-selection.mp4', mimeType: 'video/mp4', buffer: video }]);
+      await page.getByText('1 video ready.', { exact: true }).waitFor();
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['new-selection.mp4']);
+      await page.locator('#lock').click();
+      await unlock(page);
+      assert.deepEqual(await page.locator('.clip b').allTextContents(), ['new-selection.mp4']);
       // This verifies the app's invocation, not the native iOS Save Video sheet.
+    });
+
+    await run('lock during dense overlap inspection cannot restore a stale preview', async page => {
+      await page.goto(base);
+      await unlock(page);
+      await choose(page, ['overlap-a', 'overlap-b'].map(id => resolve(output, `${id}.mp4`)));
+      await page.getByText('2 videos ready.', { exact: true }).waitFor();
+      await page.evaluate(() => {
+        const original = VideoDecoder.prototype.decode;
+        let count = 0;
+        VideoDecoder.prototype.decode = function (...args) {
+          const result = original.apply(this, args);
+          if (++count === 5) queueMicrotask(() => document.querySelector('#lock')?.click());
+          return result;
+        };
+      });
+      await page.locator('#create').click();
+      await page.locator('#p').waitFor({ timeout: 30000 });
+      assert.equal(await page.locator('#finished').count(), 0);
+      assert.doesNotMatch(await page.locator('#app').innerText(), /overlap-a|overlap-b/);
+      await unlock(page);
+      assert.equal(await page.locator('.clip').count(), 2);
+      assert.equal(await page.locator('#finished').count(), 0);
     });
     await browser.close();
   }
