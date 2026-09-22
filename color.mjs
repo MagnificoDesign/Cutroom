@@ -1,4 +1,4 @@
-import { isHdr } from './quality.mjs?v=14';
+import { isHdr } from './quality.mjs?v=15';
 
 // Missing container hints must not overwrite the decoded frame's real color
 // description. Decode metadata is authoritative for the exposed raw planes.

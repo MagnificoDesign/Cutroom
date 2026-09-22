@@ -1,4 +1,4 @@
-import { frameSimilarity } from './core.mjs?v=14';
+import { frameSimilarity } from './core.mjs?v=15';
 
 export const MIN_OVERLAP = .8;
 export const MAX_OVERLAP = 12;

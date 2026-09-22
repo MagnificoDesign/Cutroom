@@ -1,5 +1,5 @@
-import { descriptor } from './core.mjs?v=14';
-import { check } from './vault.mjs?v=14';
+import { descriptor } from './core.mjs?v=15';
+import { check } from './vault.mjs?v=15';
 import { Input, ALL_FORMATS, BlobSource, CanvasSink, AudioBufferSink } from './mediabunny.mjs?v=6';
 
 export function guarded(promise, signal, message = 'This video took too long to process. Try a shorter clip.') {

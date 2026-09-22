@@ -1,7 +1,7 @@
 import { EncodedPacketSink, canEncodeAudio } from './mediabunny.mjs?v=6';
-import { check } from './vault.mjs?v=14';
-import { guarded } from './media.mjs?v=14';
-import { sameConfig, copyRange, MAX_EXPORT_BYTES } from './quality.mjs?v=14';
+import { check } from './vault.mjs?v=15';
+import { guarded } from './media.mjs?v=15';
+import { sameConfig, copyRange, MAX_EXPORT_BYTES } from './quality.mjs?v=15';
 
 // A complete edit may copy compressed pictures when every boundary is safe and
 // all decoder/color/orientation settings agree. Mixed compressed/re-encoded GOPs

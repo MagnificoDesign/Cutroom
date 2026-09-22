@@ -46,9 +46,9 @@ try {
   page.on('request', request => { if (/^https?:/.test(request.url()) && (!request.url().startsWith(base + '/') || request.method() !== 'GET')) requests.push(request.url()); });
   await page.goto(base);
   const result = await page.evaluate(async () => {
-    const { analyzeContinuity } = await import('/continuity.mjs?v=14');
-    const { probe } = await import('/media.mjs?v=14');
-    const { renderEdit } = await import('/renderer.mjs?v=14');
+    const { analyzeContinuity } = await import('/continuity.mjs?v=15');
+    const { probe } = await import('/media.mjs?v=15');
+    const { renderEdit } = await import('/renderer.mjs?v=15');
     const clips = [], blobs = new Map();
     // Deliberately shuffled: the bank is not already a timeline.
     for (const take of [3, 0, 5, 1, 4, 2]) {
@@ -106,7 +106,7 @@ try {
   assert.deepEqual(errors, []); assert.deepEqual(requests, []);
   console.log(`PASS continuity: 6 shuffled four-second takes → ${result.duration.toFixed(3)}s, ${result.segments.length} pieces, ${result.checked} candidate connections checked in ${(result.selectedMs / 1000).toFixed(2)}s. All 240 world frames appear once; source tone is audible throughout. Motion steps ${Math.min(...steps).toFixed(3)}–${Math.max(...steps).toFixed(3)}px.`);
   const long = await page.evaluate(async () => {
-    const { renderEdit } = await import('/renderer.mjs?v=14');
+    const { renderEdit } = await import('/renderer.mjs?v=15');
     const { AudioBufferSource } = await import('/mediabunny.mjs?v=6');
     const add = AudioBufferSource.prototype.add; let blocks = 0, maximum = 0;
     AudioBufferSource.prototype.add = function(buffer) { blocks++; maximum = Math.max(maximum, buffer.length); return add.call(this, buffer); };

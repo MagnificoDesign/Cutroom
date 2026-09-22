@@ -3,23 +3,24 @@ import {
   CanvasSource, VideoSampleSink, AudioBufferSink, AudioBufferSource, EncodedVideoPacketSource, Quality,
   canEncodeVideo, canEncodeAudio
 } from './mediabunny.mjs?v=6';
-import { check } from './vault.mjs?v=14';
-import { MAX_EDIT_SECONDS } from './edit-policy.mjs?v=14';
-import { validatePlan } from './planner.mjs?v=14';
-import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=14';
-import { audioChunks } from './render-core.mjs?v=14';
-import { guarded } from './media.mjs?v=14';
-import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=14';
-import { interpolateFrame } from './transition-core.mjs?v=14';
-import { inspectSources } from './export-inspect.mjs?v=14';
-import { outputProfiles, videoBitrate, frameSlots, MAX_EXPORT_BYTES } from './quality.mjs?v=14';
-import { createPainter } from './color-gpu.mjs?v=14';
-import { applyColor } from './color.mjs?v=14';
-import { finishingAt, drawFinishing } from './finish-core.mjs?v=14';
-import { copyPlan, copyPictures } from './packet-copy.mjs?v=14';
+import { check } from './vault.mjs?v=15';
+import { MAX_EDIT_SECONDS } from './edit-policy.mjs?v=15';
+import { validatePlan } from './planner.mjs?v=15';
+import { FRAME_RATE, SAMPLE_RATE, renderTimeline } from './render-core.mjs?v=15';
+import { audioChunks } from './render-core.mjs?v=15';
+import { guarded } from './media.mjs?v=15';
+import { canSmoothJoin, inspectJoin, prepareBridge } from './transitions.mjs?v=15';
+import { interpolateFrame } from './transition-core.mjs?v=15';
+import { inspectSources } from './export-inspect.mjs?v=15';
+import { outputProfiles, videoBitrate, frameSlots, MAX_EXPORT_BYTES } from './quality.mjs?v=15';
+import { createPainter } from './color-gpu.mjs?v=15';
+import { applyColor } from './color.mjs?v=15';
+import { finishingAt, drawFinishing } from './finish-core.mjs?v=15';
+import { copyPlan, copyPictures } from './packet-copy.mjs?v=15';
 
-import { reviewJoins } from './review-joins.mjs?v=14';
-import { encodingStep, ExportResourceError, saferProfile } from './export-recovery.mjs?v=14';
+import { reviewJoins, reviewMatchedCuts } from './review-joins.mjs?v=15';
+import { encodingStep, ExportResourceError, saferProfile } from './export-recovery.mjs?v=15';
+import { requireConnectedEdit, analysisReport } from './analysis-report.mjs?v=15';
 
 export async function selectFormat(size) {
   if (typeof VideoEncoder === 'undefined' || typeof AudioEncoder === 'undefined') return null;
@@ -203,6 +204,7 @@ async function verifiedAttempt(options) {
 }
 
 export async function renderEdit({ clips, segments, plan, getBlob, signal, onProgress = () => {} }) {
+  if (plan?.continuity) requireConnectedEdit({ ...plan, segments, diagnostics: plan.diagnostics || analysisReport(clips) }, clips.length);
   validatePlan(clips, segments, { allowSubset: !!plan?.continuity });
   const timeline = renderTimeline(segments), total = timeline.reduce((sum, part) => sum + part.duration, 0);
   if (total > MAX_EDIT_SECONDS + .02) throw new Error('Choose up to 30 minutes for one edit.');
@@ -235,7 +237,8 @@ export async function renderEdit({ clips, segments, plan, getBlob, signal, onPro
   const parameters = { ordered, infos, timeline, total, getBlob, signal, onProgress, requiredBridges, requiredFinishing };
   if (copy) {
     try {
-      return await verifiedAttempt({ ...parameters, joins, copy, format: copy.format, size: { width: copy.width, height: copy.height } });
+      const result = await verifiedAttempt({ ...parameters, joins, copy, format: copy.format, size: { width: copy.width, height: copy.height } });
+      return { ...result, matchedCutChecks: await reviewMatchedCuts({ result, plan, signal, onProgress }) };
     } catch (error) { check(signal); if (!format) throw error; }
     onProgress({ stage: 'Preparing a compatible export…', fraction: 0 });
   }
@@ -273,6 +276,7 @@ export async function renderEdit({ clips, segments, plan, getBlob, signal, onPro
       continue;
     }
     check(signal);
-    return { ...result, recovered, simplifiedJoins, qualityChecks };
+    const matchedCutChecks = await reviewMatchedCuts({ result, plan, signal, onProgress });
+    return { ...result, recovered, simplifiedJoins, qualityChecks, matchedCutChecks };
   }
 }

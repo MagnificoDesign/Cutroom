@@ -1,5 +1,5 @@
-import { trackMotion } from './motion.mjs?v=14';
-import { srgbToLinear, linearToSrgb } from './color.mjs?v=14';
+import { trackMotion } from './motion.mjs?v=15';
+import { srgbToLinear, linearToSrgb } from './color.mjs?v=15';
 
 const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] || 0;
 const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));

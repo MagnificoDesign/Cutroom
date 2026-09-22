@@ -1,11 +1,12 @@
-import { openVault, check } from './vault.mjs?v=14';
-import { probe, thumbnail } from './media.mjs?v=14';
-import { analyzeContinuity } from './continuity.mjs?v=14';
-import { checkBank, MAX_EDIT_SECONDS } from './edit-policy.mjs?v=14';
-import { renderEdit } from './renderer.mjs?v=14';
+import { openVault, check } from './vault.mjs?v=15';
+import { probe, thumbnail } from './media.mjs?v=15';
+import { analyzeContinuity } from './continuity.mjs?v=15';
+import { checkBank, MAX_EDIT_SECONDS } from './edit-policy.mjs?v=15';
+import { renderEdit } from './renderer.mjs?v=15';
+import { requireConnectedEdit, reportError } from './analysis-report.mjs?v=15';
 
 const $ = selector => document.querySelector(selector);
-const state = { clips: [], saved: [], plan: null, result: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio', visibleClips: 24 };
+const state = { clips: [], saved: [], plan: null, result: null, diagnostics: null, busy: false, progress: 0, message: '', failures: [], undo: null, screen: 'studio', visibleClips: 24 };
 let vault, session = new AbortController(), unlocking = false, picker = null, creating = null;
 const thumbnails = new Map();
 let thumbnailJob = null, clipPreview = null, joinPreview = null;
@@ -29,6 +30,7 @@ function clearPlan() {
   if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
   if (state.result?.url) URL.revokeObjectURL(state.result.url);
   state.result = null;
+  state.diagnostics = null;
   state.plan = null; state.screen = 'studio';
 }
 function explain(error, stage = 'import') {
@@ -309,7 +311,9 @@ async function create({ keepFull = false } = {}) {
       onProgress: ({ stage, fraction }) => { check(signal); state.message = stage; state.progress = fraction * .48; render(); }
     });
     check(signal);
+    if (!keepFull) requireConnectedEdit(plan, entries.length);
     state.plan = plan;
+    state.diagnostics = plan.diagnostics || null;
     const result = await renderEdit({
       clips: state.clips, segments: state.plan.segments, plan: keepFull ? undefined : state.plan, signal,
       getBlob: (clip, signal) => vault.blob(clip, signal),
@@ -327,7 +331,12 @@ async function create({ keepFull = false } = {}) {
     state.message = '';
     state.screen = 'result';
   } catch (error) {
-    if (active(parent)) { clearPlan(); state.message = signal.aborted ? 'Creation cancelled. Your videos are still ready.' : explain(error, 'create'); }
+    if (active(parent)) {
+      const report = error.report || state.diagnostics;
+      if (report && !error.report && !signal.aborted) { report.outcome = 'export-failed'; reportError(report, 'export', [], error); }
+      clearPlan(); state.diagnostics = signal.aborted ? null : report;
+      state.message = signal.aborted ? 'Creation cancelled. Your videos are still ready.' : explain(error, 'create');
+    }
   } finally {
     parent.removeEventListener('abort', abort);
     await wakeLock?.release().catch(() => {});
@@ -406,7 +415,28 @@ function lock() {
   render();
 }
 
-const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.14</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+const head = () => `<div class="top"><div class="mark">C</div><div><h1>Cutroom</h1><span>Private editor · v0.15</span></div>${vault?.key ? '<button id="lock" class="ghost">Lock</button>' : ''}</div>`;
+function searchDetails(parent) {
+  const report = state.diagnostics;
+  if (!report) return;
+  const section = document.createElement('details'); section.className = 'search-details';
+  const summary = document.createElement('summary'); summary.textContent = 'Search details'; section.append(summary);
+  const text = document.createElement('p');
+  text.textContent = `${report.analyzed} of ${report.sources} clips analyzed. ${report.checked} candidate connections checked; ${report.selected} clips selected. ${report.errorCount ? `${report.errorCount} processing failures occurred. ` : ''}${report.limited ? 'The processing limit was reached; some possible connections remain unchecked. ' : ''}This report contains counts and clip numbers, with no videos, pictures or filenames.`;
+  const button = document.createElement('button'); button.className = 'secondary'; button.textContent = 'Copy search report';
+  button.onclick = async () => {
+    try { await navigator.clipboard.writeText(JSON.stringify(report, null, 2)); button.textContent = 'Report copied'; }
+    catch { button.textContent = 'Copy unavailable'; pre.hidden = false; }
+  };
+  const pre = document.createElement('pre'); pre.textContent = JSON.stringify(report, null, 2); pre.hidden = true;
+  pre.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px';
+  section.append(text, button, pre);
+  if (state.screen === 'studio' && state.clips.length > 1) {
+    const full = document.createElement('button'); full.id = 'full'; full.className = 'secondary'; full.textContent = 'Use full clips';
+    full.onclick = () => create({ keepFull: true }); section.append(full);
+  }
+  parent.insertBefore(section, parent.querySelector('.clips'));
+}
 function render() {
   // A status/error rerender must not leave a detached player or join loop alive.
   stopJoinPreview(true);
@@ -426,9 +456,9 @@ function render() {
     const edits = state.plan.segments.map(part => `<li><b>${esc(byId.get(part.id).name)}</b><span>${part.start.toFixed(2)}–${part.end.toFixed(2)} sec of ${byId.get(part.id).duration.toFixed(2)}</span></li>`).join('');
     const smooth = result.smoothedJoins || [];
     const fullTooLong = state.clips.reduce((n, c) => n + c.duration, 0) > MAX_EDIT_SECONDS + .02;
-    const selectionNote = state.plan.continuity ? `Used ${state.plan.segments.length} of ${state.clips.length} clips · ${timeLabel(result.duration)} from ${timeLabel(state.plan.inputSeconds)} of footage. ${state.plan.failures.length ? `${state.plan.failures.length} could not be analyzed; see Review edits.` : state.plan.segments.length === 1 && state.clips.length > 1 ? 'No multi-clip connection passed the checks.' : ''} Your imported clips remain available in Edit These Clips.` : '';
+    const selectionNote = state.plan.continuity ? `Used ${state.plan.segments.length} of ${state.clips.length} clips · ${timeLabel(result.duration)} from ${timeLabel(state.plan.inputSeconds)} of footage. ${state.plan.failures.length ? `${state.plan.failures.length} could not be analyzed; see Review edits.` : state.plan.diagnostics?.errorCount ? 'Some connections could not be checked; see Search details.' : state.plan.segments.length === 1 && state.clips.length > 1 ? 'No multi-clip connection passed the checks.' : ''} Your imported clips remain available in Edit These Clips.` : '';
     const merged = state.plan.joins?.filter(join => join.kind === 'overlap').length || 0;
-    const joins = result.timeline.slice(1).map((part, index) => `<button class="join-button" data-join="${index}" aria-label="Preview join ${index + 1}"><b>${playIcon} Preview join ${index + 1}</b><span>${part.outputStart.toFixed(2)} sec · ${result.smoothedJoins?.some(join => join.index === index) ? 'Smoothed connection' : state.plan.joins?.[index]?.kind === 'overlap' ? 'Matched overlap' : result.finishedJoins?.some(join => join.index === index) ? 'Matched framing / color' : 'Cut'}</span><small>${esc(byId.get(result.timeline[index].id).name)} → ${esc(byId.get(part.id).name)}</small></button>`).join('');
+    const joins = result.timeline.slice(1).map((part, index) => `<button class="join-button" data-join="${index}" aria-label="Preview join ${index + 1}"><b>${playIcon} Preview join ${index + 1}</b><span>${part.outputStart.toFixed(2)} sec · ${result.smoothedJoins?.some(join => join.index === index) ? 'Smoothed connection' : state.plan.joins?.[index]?.kind === 'overlap' ? 'Matched overlap' : result.finishedJoins?.some(join => join.index === index) ? 'Matched framing / color' : state.plan.joins?.[index]?.kind === 'match-cut' ? 'Matched cut' : 'Cut'}</span><small>${esc(byId.get(result.timeline[index].id).name)} → ${esc(byId.get(part.id).name)}</small></button>`).join('');
     app.innerHTML = head() + `<section class="panel result"><div class="eyebrow">YOUR EDIT</div><h2>Ready to watch.</h2><video id="finished" class="finished" src="${esc(result.url)}" controls playsinline preload="metadata" aria-label="Your finished video"></video><p class="result-meta">${result.duration.toFixed(1)} sec · ${(result.blob.size / 1048576).toFixed(1)} MB · ${result.extension.toUpperCase()} · ${result.width}×${result.height}</p>${selectionNote ? `<p class="selection-note">${selectionNote}</p>` : ''}<button id="save" class="primary">Save / Share</button><p class="save-hint">Choose Save Video for Photos if offered, or Save to Files.</p>${state.message ? `<p class="error" role="alert">${esc(state.message)}</p>` : ''}<button id="edit" class="secondary">Edit These Clips</button><button id="again" class="secondary">Create New Video</button><details class="edit-review"><summary>Review edits</summary><p>${state.plan.continuity ? state.plan.segments.length > 1 ? 'The search selected connected sections to retain usable footage with consistent motion. Small visual differences are allowed. Footage outside this sequence was not deleted or declared duplicate.' : 'No multi-clip sequence passed the connection checks. One clip was selected; the other takes remain available.' : state.plan.improved ? 'The order and cut points were chosen together for visual continuity.' : smooth.length ? 'The clip order and timing were kept.' : 'The full clips were kept in the selected order.'} Your originals are unchanged.</p>${smooth.length ? `<p>${smooth.reduce((sum, join) => sum + join.frames, 0)} in-between frames were created across ${smooth.length} connection${smooth.length === 1 ? '' : 's'} to smooth small movement gaps. Sound keeps its original timing.</p>` : ''}<ol>${edits}</ol>${joins ? `<div class="join-list"><h3>Check the joins</h3><p>Play a few seconds around each connection.</p>${joins}<p id="join-status" role="status"></p></div>` : ''}<button id="full" class="secondary" ${fullTooLong ? 'disabled' : ''}>Make a version with full clips</button>${fullTooLong ? '<p>For a full-clips version, use Edit These Clips to choose 30 minutes or less.</p>' : ''}</details></section>`;
     $('#save').onclick = saveResult;
     $('#again').onclick = () => chooseClips([], { fresh: true });
@@ -441,6 +471,9 @@ function render() {
       details.push(`Analyzed ${state.plan.analyzedCount} of ${state.clips.length} clips and checked ${state.plan.checkedConnections} candidate connections. Source sound follows the picture cuts; sentence and story meaning are not recognized.`);
       if (state.plan.failures.length) details.push(`${state.plan.failures.length} clips could not be analyzed in this browser and were left out of this edit.`);
       if (state.plan.searchLimited) details.push('The search reached its processing limit; some possible connections remain unchecked.');
+      if (state.plan.diagnostics?.errorCount) details.push(`${state.plan.diagnostics.errorCount} connection checks encountered processing failures; those checks could not judge a match.`);
+      const matchedCuts = state.plan.joins.filter(join => join.kind === 'match-cut').length;
+      if (matchedCuts) details.push(`${matchedCuts} connections use the best matching original frames with small differences in appearance. These are visual matches, not proof of the same event or invisible joins.`);
       for (const failure of state.plan.failures) {
         const note = document.createElement('p'); note.className = 'error';
         note.textContent = `${byId.get(failure.id)?.name || 'Video'}: ${failure.reason}`;
@@ -469,12 +502,14 @@ function render() {
       note.textContent = 'Some similar footage was kept in full because it could not be joined safely.';
       review.insertBefore(note, review.querySelector('ol'));
     }
+    searchDetails(app.querySelector('.panel'));
   } else {
     const clips = state.clips.slice(0, state.visibleClips).map((clip, index) => `<div class="clip"><button type="button" class="clip-preview" data-preview="${esc(clip.id)}" aria-label="Preview ${esc(clip.name)}" ${state.busy ? 'disabled' : ''}><span class="clip-thumb" data-thumbnail="${esc(clip.id)}">${thumbnails.get(clip.id) ? `<img src="${esc(thumbnails.get(clip.id))}" alt="">` : ''}<span class="thumb-play">${playIcon}</span><span class="num" aria-hidden="true">${index + 1}</span></span><span class="clip-info"><b>${esc(clip.name)}</b><small>${clip.duration.toFixed(1)} sec · ${(clip.size / 1048576).toFixed(1)} MB</small></span></button><button type="button" class="clip-remove" data-remove="${esc(clip.id)}" aria-label="Remove ${esc(clip.name)} from this video" ${state.busy ? 'disabled' : ''}>Remove</button></div>`).join('');
     const failures = state.failures.length ? `<div class="error" role="alert">${state.failures.map(item => `<p><b>${esc(item.file.name)}</b>: ${esc(item.reason)}</p>`).join('')}</div><button id="retry" class="secondary" ${state.busy ? 'disabled' : ''}>Retry Failed Videos</button>` : '';
-    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Add alternate takes of a scene. Cutroom will select connected sections and leave out footage that breaks the flow. Imported copies stay encrypted until you start a new video.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>+ Add Videos</button><p>${state.clips.length} clips · ${(state.clips.reduce((n, c) => n + c.duration, 0) / 60).toFixed(1)} min of source</p><button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button><div class="clips">${clips}</div>${state.clips.length > state.visibleClips ? `<button id="more" class="secondary" ${state.busy ? 'disabled' : ''}>Show more clips (${state.clips.length - state.visibleClips} remaining)</button>` : ''}${state.message ? `<div class="status" role="status"><span>${esc(state.message)}</span>${state.undo ? `<button id="undo" class="undo" ${state.busy ? 'disabled' : ''}>Undo Remove</button>` : ''}</div>` : ''}${failures}</section>`;
+    app.innerHTML = head() + `<section class="panel"><div class="eyebrow">NEW EDIT</div><h2>${state.diagnostics && state.message ? 'Couldn’t finish this edit.' : state.clips.length ? 'Ready to create.' : 'Add your videos.'}</h2><p>Add alternate takes of a scene. Cutroom will select connected sections and leave out footage that breaks the flow. Imported copies stay encrypted until you start a new video.</p><button id="add" class="upload" ${state.busy ? 'disabled' : ''}>+ Add Videos</button><p>${state.clips.length} clips · ${(state.clips.reduce((n, c) => n + c.duration, 0) / 60).toFixed(1)} min of source</p><button id="create" class="primary" ${!state.clips.length || state.busy ? 'disabled' : ''}>Create</button>${state.message ? `<div class="status" role="status"><span>${esc(state.message)}</span>${state.undo ? `<button id="undo" class="undo" ${state.busy ? 'disabled' : ''}>Undo Remove</button>` : ''}</div>` : ''}<div class="clips">${clips}</div>${state.clips.length > state.visibleClips ? `<button id="more" class="secondary" ${state.busy ? 'disabled' : ''}>Show more clips (${state.clips.length - state.visibleClips} remaining)</button>` : ''}${failures}</section>`;
     $('#add').onclick = openPicker;
     $('#create').onclick = () => create();
+    searchDetails(app.querySelector('.panel'));
     if ($('#more')) $('#more').onclick = () => { state.visibleClips += 24; render(); };
     app.querySelectorAll('[data-preview]').forEach(button => { button.onclick = () => openClipPreview(button.dataset.preview); });
     app.querySelectorAll('[data-remove]').forEach(button => {
@@ -508,7 +543,7 @@ window.addEventListener('pagehide', lock);
 
 (async () => {
   vault = await openVault();
-  navigator.serviceWorker?.register('./sw.js?v=14', { updateViaCache: 'none' }).catch(() => {});
+  navigator.serviceWorker?.register('./sw.js?v=15', { updateViaCache: 'none' }).catch(() => {});
   render();
 })().catch(() => {
   $('#app').innerHTML = '<div class="error" role="alert">Cutroom could not open local storage. Reopen it in Safari and try again.</div>';

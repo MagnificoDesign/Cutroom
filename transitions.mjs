@@ -1,10 +1,10 @@
 import { Input, ALL_FORMATS, BlobSource, VideoSampleSink } from './mediabunny.mjs?v=6';
-import { guarded, describePixels } from './media.mjs?v=14';
-import { check } from './vault.mjs?v=14';
-import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=14';
-import { FRAME_RATE } from './render-core.mjs?v=14';
-import { createPainter } from './color-gpu.mjs?v=14';
-import { chooseFinishing, validateFinishing } from './finish-core.mjs?v=14';
+import { guarded, describePixels } from './media.mjs?v=15';
+import { check } from './vault.mjs?v=15';
+import { chooseBridge, validateBridgeImages } from './transition-core.mjs?v=15';
+import { FRAME_RATE } from './render-core.mjs?v=15';
+import { createPainter } from './color-gpu.mjs?v=15';
+import { chooseFinishing, validateFinishing } from './finish-core.mjs?v=15';
 
 export function canSmoothJoin(clips, timeline, index, plan) {
   if (!plan || index + 1 >= timeline.length || timeline[index].duration < .6 || timeline[index + 1].duration < .6) return false;

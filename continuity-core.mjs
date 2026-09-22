@@ -1,7 +1,7 @@
-import { frameSimilarity } from './core.mjs?v=14';
-import { flow } from './planner.mjs?v=14';
-import { MAX_EDIT_SECONDS, minimumPiece } from './edit-policy.mjs?v=14';
-import { cutAt } from './cut-timing.mjs?v=14';
+import { frameSimilarity } from './core.mjs?v=15';
+import { flow } from './planner.mjs?v=15';
+import { MAX_EDIT_SECONDS, minimumPiece } from './edit-policy.mjs?v=15';
+import { cutAt } from './cut-timing.mjs?v=15';
 
 export function sourceEnd(clip, frame) {
   if (!clip.frameTimes) return Math.min(clip.duration, frame.timestamp + frame.duration);
@@ -130,7 +130,10 @@ export async function proposeConnections(clips, signal, onProgress = () => {}) {
         const b = match.index, other = clips[b];
         if (a === b || Math.abs(clip.width / clip.height / (other.width / other.height) - 1) > .01) continue;
         const similarity = frameSimilarity(frame, match.frame), movement = coarseMotion(frame.inMotion, match.frame.outMotion);
-        if (similarity < .86 || movement > .58) continue;
+        // Candidate generation is a broad retrieval step. Edit admission below
+        // uses spatial structure and several source frames; near-identity is
+        // reserved for overlap/interpolation, not ordinary matched cuts.
+        if (similarity < .72 || movement > .88) continue;
         const cost = .4 * (1 - similarity) + .2 * movement + .4 * Math.min(1, detailDifference(frame, match.frame) * 5);
         if (!pairs.has(b)) pairs.set(b, []);
         pairs.get(b).push({ a: clip.id, b: other.id, end, start: match.frame.t, cost, status: 'coarse' });
@@ -144,7 +147,7 @@ export async function proposeConnections(clips, signal, onProgress = () => {}) {
       const other = clips[b], first = other.samples[0];
       if (a === b || !last || !first || Math.abs(clip.width / clip.height / (other.width / other.height) - 1) > .01) continue;
       const similarity = frameSimilarity(last, first), detail = detailDifference(last, first);
-      if (similarity < .86 || detail > .07) continue;
+      if (similarity < .72 || detail > .16) continue;
       const cost = .4 * (1 - similarity) + .2 * coarseMotion(last.inMotion, first.outMotion) + .4 * Math.min(1, detail * 5);
       if (!pairs.has(b)) pairs.set(b, []);
       pairs.get(b).push({ a: clip.id, b: other.id, end: clip.duration, start: 0, cost, status: 'coarse', boundary: true });
@@ -181,7 +184,7 @@ export async function selectSequence(clips, edges, { signal, target = MAX_EDIT_S
     const end = cutAt(clip, limit, state.start, limit);
     if (end - state.start < Math.max(minimumPiece(clip), state.requiredKeep || 0) - 1e-7) return null;
     const duration = state.elapsed + end - state.start;
-    return { state, end, duration, score: duration - state.penalty * 3 - state.depth * .12 };
+    return { state, end, duration, score: duration - state.penalty * 6 - state.depth * .12 };
   };
   let beam = clips.map((c, i) => ({ id: c.id, start: 0, elapsed: 0, penalty: 0, mask: 1n << BigInt(i), parent: null, depth: 0 }));
   let best = null;

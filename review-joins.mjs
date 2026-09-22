@@ -1,7 +1,25 @@
-import { pictures } from './transitions.mjs?v=14';
-import { judgeJoin } from './join-quality.mjs?v=14';
-import { outputSize } from './quality.mjs?v=14';
-import { check } from './vault.mjs?v=14';
+import { pictures } from './transitions.mjs?v=15';
+import { judgeJoin } from './join-quality.mjs?v=15';
+import { outputSize } from './quality.mjs?v=15';
+import { check } from './vault.mjs?v=15';
+import { appearanceMatch } from './match-cut.mjs?v=15';
+
+export async function reviewMatchedCuts({ result, plan, signal, onProgress = () => {} }) {
+  const checks = [], size = outputSize(result.width, result.height, 384);
+  for (let index = 0; index < (plan?.joins?.length || 0); index++) {
+    if (plan.joins[index].kind !== 'match-cut') continue;
+    check(signal);
+    onProgress({ stage: `Checking finished connection ${index + 1} of ${plan.joins.length}…`, fraction: .99 });
+    const a = result.timeline[index].slots.at(-1), b = result.timeline[index + 1].slots[0];
+    const frames = await pictures(result.blob, [a, b].map(slot => ({ time: slot.time + Math.min(.005, slot.duration / 2) })), size, signal, false);
+    check(signal);
+    if (frames.length !== 2) throw new Error('A finished connection could not be decoded. Your clips are still ready.');
+    const match = appearanceMatch(frames[0].image, frames[1].image);
+    checks.push({ index, ok: match.accepted, reason: match.reason || 'matched-picture' });
+    if (!match.accepted) throw new Error('A finished connection lost its picture match during export. Your clips are still ready.');
+  }
+  return checks;
+}
 
 // Read only a short sequence around one enhanced join at a time. This examines
 // the actual encoded movie after full-size warping/color work, including the

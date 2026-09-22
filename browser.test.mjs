@@ -113,7 +113,7 @@ async function visibility(page, state) {
 }
 async function storedCopies(page) {
   return page.evaluate(async () => {
-    const { openVault } = await import('/vault.mjs?v=14');
+    const { openVault } = await import('/vault.mjs?v=15');
     const vault = await openVault();
     try {
       return await new Promise((resolve, reject) => {
@@ -529,6 +529,35 @@ try {
       assert.equal(await page.locator('.clip').count(), 2);
       assert.equal(await page.locator('#finished').count(), 0);
     });
+    await run('detailed decoder failures stay visible and never export one clip as a merged result', async page => {
+      await page.goto(base); await unlock(page);
+      await choose(page, ['pan-a', 'pan-b'].map(id => resolve(output, `${id}.mp4`)));
+      await page.getByText('2 videos ready.', { exact: true }).waitFor();
+      await page.evaluate(async () => {
+        const { CanvasSink } = await import('/mediabunny.mjs?v=6');
+        const original = CanvasSink.prototype.canvasesAtTimestamps;
+        CanvasSink.prototype.canvasesAtTimestamps = function (...args) {
+          if (document.querySelector('#app').textContent.includes('Checking connection')) throw new DOMException('PRIVATE decoder detail', 'EncodingError');
+          return original.apply(this, args);
+        };
+        Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async text => { window.copiedReport = text; } });
+      });
+      await page.locator('#create').click();
+      await page.getByText(/processing failures/).first().waitFor({ timeout: 90000 });
+      assert.equal(await page.locator('#finished').count(), 0);
+      assert.equal(await page.locator('.clip').count(), 2);
+      assert.equal((await storedCopies(page)).clips, 2);
+      await page.locator('.search-details summary').click();
+      await page.getByRole('button', { name: 'Copy search report', exact: true }).click();
+      await page.getByRole('button', { name: 'Report copied', exact: true }).waitFor();
+      const report = await page.evaluate(() => window.copiedReport);
+      assert(JSON.parse(report).errorCount > 0); assert.doesNotMatch(report, /PRIVATE|pan-a|pan-b|pixels|fingerprint/);
+      await page.screenshot({ path: resolve(output, `${name}-v015-search-failure.png`), fullPage: true });
+      await page.locator('#lock').click(); await page.locator('#p').waitFor();
+      assert.equal(await page.locator('.search-details').count(), 0);
+      await unlock(page); assert.equal(await page.locator('.clip').count(), 2);
+      assert.equal(await page.locator('.search-details').count(), 0);
+    });
     await run('clip previews, undo, join playback and edit return preserve the selected videos', async page => {
       await page.goto(base);
       await unlock(page);
@@ -554,9 +583,10 @@ try {
       await page.reload(); await unlock(page);
       assert.deepEqual(await page.locator('.clip b').allTextContents(), ['red.mp4', 'lime.mp4', 'blue.mp4']);
       await page.locator('#create').click();
-      await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
-      await page.locator('.edit-review summary').click();
-      assert.match(await page.locator('.selection-note').innerText(), /Used 1 of 3/);
+      await page.getByText(/No suitable multi-clip sequence/).waitFor({ timeout: 90000 });
+      assert.equal(await page.locator('#finished').count(), 0);
+      assert.equal(await page.locator('.clip').count(), 3);
+      await page.locator('.search-details summary').click();
       await page.locator('#full').click();
       await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
       const resultUrl = await page.locator('#finished').getAttribute('src');
@@ -577,9 +607,12 @@ try {
       await page.getByRole('button', { name: 'Remove lime.mp4 from this video', exact: true }).click();
       await page.locator('#undo').waitFor();
       await page.locator('#create').click();
+      await page.getByText(/No suitable multi-clip sequence/).waitFor({ timeout: 90000 });
+      assert.equal(await page.locator('#finished').count(), 0);
+      assert.equal(await page.locator('.clip').count(), 2);
+      await page.locator('.search-details summary').click();
+      await page.locator('#full').click();
       await page.getByText('Ready to watch.', { exact: true }).waitFor({ timeout: 90000 });
-      assert.match(await page.locator('.selection-note').innerText(), /Used 1 of 2/);
-      assert.equal(await page.locator('.edit-review li b').count(), 1);
       assert.equal((await storedCopies(page)).clips, 2); // Removed lime is no longer retained for Undo.
       await page.locator('#again').click();
       await page.getByText('Add your videos.', { exact: true }).waitFor();
@@ -620,8 +653,8 @@ try {
     await run('old import archives are deleted on upgrade and removed clips do not survive locking', async page => {
       await page.goto(base + '/harness');
       await page.evaluate(async password => {
-        const { openVault, seal, CHUNK_SIZE } = await import('/vault.mjs?v=14');
-        const { probe } = await import('/media.mjs?v=14');
+        const { openVault, seal, CHUNK_SIZE } = await import('/vault.mjs?v=15');
+        const { probe } = await import('/media.mjs?v=15');
         const vault = await openVault();
         await vault.unlock(password);
         const blob = await (await fetch('/test-results/harmless.mp4')).blob();
@@ -648,7 +681,7 @@ try {
       assert.equal(await page.locator('#new').count(), 1); // Can clear even the last pending Undo.
       await page.locator('#lock').click();
       await page.waitForFunction(async () => {
-        const { openVault } = await import('/vault.mjs?v=14');
+        const { openVault } = await import('/vault.mjs?v=15');
         const vault = await openVault();
         const count = await new Promise(resolve => {
           vault.db.transaction('clips').objectStore('clips').count().onsuccess = event => resolve(event.target.result);
@@ -852,7 +885,7 @@ try {
       await page.locator('#create:not([disabled])').waitFor();
       await page.locator('#create').click();
       await page.locator('#finished').waitFor({ timeout: 60000 });
-      await page.locator('summary').click();
+      await page.locator('.edit-review > summary').click();
       assert.equal(await page.getByText('Smoothed connection', { exact: false }).count(), 2);
       assert.match(await page.locator('.edit-review').innerText(), /in-between frames were created across 2 connections/);
       await page.locator('#finished').evaluate(video => video.play());
@@ -866,7 +899,7 @@ try {
       await page.locator('#finished').waitFor({ timeout: 60000 });
       const after = await page.locator('#finished').getAttribute('src');
       assert.notEqual(after, before);
-      await page.locator('summary').click();
+      await page.locator('.edit-review > summary').click();
       assert.doesNotMatch(await page.locator('.edit-review').innerText(), /in-between|Smoothed connection/);
       const exported = await page.locator('#finished').evaluate(async video => Array.from(new Uint8Array(await (await fetch(video.src)).arrayBuffer())));
       const path = resolve(output, `${name}-motion-full-original.webm`);

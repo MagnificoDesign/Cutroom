@@ -1,6 +1,6 @@
-import { outputSize, videoBitrate } from './quality.mjs?v=14';
-import { guarded } from './media.mjs?v=14';
-import { check } from './vault.mjs?v=14';
+import { outputSize, videoBitrate } from './quality.mjs?v=15';
+import { guarded } from './media.mjs?v=15';
+import { check } from './vault.mjs?v=15';
 
 export class ExportResourceError extends Error {
   constructor(cause) {

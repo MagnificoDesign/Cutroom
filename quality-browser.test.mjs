@@ -100,7 +100,7 @@ try {
   await run('native cut inspection requests actual 24 60 and VFR pictures and reuses timing for export', async page => {
     const result = await page.evaluate(async () => {
       const { analyzeJoins } = await import('/analyze.mjs');
-      const { inspectMedia, probe } = await import('/media.mjs?v=14');
+      const { inspectMedia, probe } = await import('/media.mjs?v=15');
       const { renderEdit } = await import('/renderer.mjs');
       const names = ['rate24.mp4', 'rate60.mp4', 'vfr.mp4'], blobs = new Map(), clips = [], requests = [];
       for (const name of names) { const blob = await (await fetch('/test-results/quality/' + name)).blob(); blobs.set(name, blob); clips.push({ id: name, name, ...await probe(blob) }); }
@@ -197,7 +197,7 @@ try {
   await run('cancelling actual rendered-connection review publishes nothing and starts no simpler render', async page => {
     const result = await page.evaluate(async () => {
       const { renderEdit } = await import('/renderer.mjs'), { CanvasSource } = await import('/mediabunny.mjs?v=6');
-      const { probe } = await import('/media.mjs?v=14');
+      const { probe } = await import('/media.mjs?v=15');
       const blobs = new Map(), clips = [], controller = new AbortController(); let rounds = 0, encoded = false;
       const add = CanvasSource.prototype.add;
       CanvasSource.prototype.add = function(...args) { if (args[0] === 0) rounds++; encoded = true; return add.apply(this, args); };
@@ -210,7 +210,7 @@ try {
   await run('a required continuity bridge cannot silently become an unmatched cut', async page => {
     const result = await page.evaluate(async () => {
       const { renderEdit } = await import('/renderer.mjs');
-      const { probe } = await import('/media.mjs?v=14');
+      const { probe } = await import('/media.mjs?v=15');
       const { CanvasSource } = await import('/mediabunny.mjs?v=6');
       const blobs = new Map(), clips = []; let encoded = 0;
       const add = CanvasSource.prototype.add;
@@ -227,7 +227,7 @@ try {
   await run('a required framing correction cannot silently become an unmatched cut', async page => {
     const result = await page.evaluate(async () => {
       const { renderEdit } = await import('/renderer.mjs');
-      const { probe } = await import('/media.mjs?v=14');
+      const { probe } = await import('/media.mjs?v=15');
       const { CanvasSource } = await import('/mediabunny.mjs?v=6');
       const blobs = new Map(), clips = []; let encoded = 0;
       const add = CanvasSource.prototype.add;
@@ -298,7 +298,7 @@ try {
     levels.forEach((v, i) => assert(Math.abs(v - expected[i]) < 6, `${transfer} ${nits[i]} nit: ${v} expected ${expected[i]}`));
     const agreement = await page.evaluate(async transfer => {
       const { Input, BlobSource, ALL_FORMATS, VideoSampleSink } = await import('/mediabunny.mjs?v=6');
-      const { createPainter } = await import('/color-gpu.mjs?v=14'); const { paintSample } = await import('/color.mjs?v=14');
+      const { createPainter } = await import('/color-gpu.mjs?v=15'); const { paintSample } = await import('/color.mjs?v=15');
       const input = new Input({ source: new BlobSource(await (await fetch(`/test-results/quality/${transfer}.webm`)).blob()), formats: ALL_FORMATS });
       const track = await input.getPrimaryVideoTrack(), sample = await new VideoSampleSink(track).getSample(.01), color = await track.getColorSpace();
       const a = document.createElement('canvas'), b = document.createElement('canvas'); a.width = b.width = 256; a.height = b.height = 144;
@@ -350,8 +350,8 @@ try {
   await run('HDR color, crop, rotation and flip agree across CPU GPU and cancellation', async page => {
     const result = await page.evaluate(async () => {
       const { VideoSample } = await import('/mediabunny.mjs?v=6');
-      const { paintSample } = await import('/color.mjs?v=14');
-      const { createPainter } = await import('/color-gpu.mjs?v=14');
+      const { paintSample } = await import('/color.mjs?v=15');
+      const { createPainter } = await import('/color-gpu.mjs?v=15');
       const width = 64, height = 32, pixels = width * height, raw = new Uint16Array(pixels * 3);
       for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
         const i = y * width + x; raw[i] = 100 + x * 7 + y * 4; raw[pixels + i] = 450 + x; raw[pixels * 2 + i] = 450 + y * 3;

@@ -1,7 +1,7 @@
-import { boundaryCost, signature } from './planner.mjs?v=14';
-import { trackMotion } from './motion.mjs?v=14';
-import { chooseBridge, motionGrid, validateBridgeImages, validateMatchImages } from './transition-core.mjs?v=14';
-import { chooseFinishing } from './finish-core.mjs?v=14';
+import { boundaryCost, signature } from './planner.mjs?v=15';
+import { trackMotion } from './motion.mjs?v=15';
+import { chooseBridge, motionGrid, validateBridgeImages, validateMatchImages } from './transition-core.mjs?v=15';
+import { chooseFinishing } from './finish-core.mjs?v=15';
 
 const speed = v => Math.hypot(v.x, v.y);
 const compatible = (a, b) => {

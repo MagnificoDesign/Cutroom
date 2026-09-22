@@ -1,4 +1,4 @@
-import { trackMotion } from './motion.mjs?v=14';
+import { trackMotion } from './motion.mjs?v=15';
 
 // A bounded temporal check of decoded pictures, not a claim of perceptual or
 // semantic understanding. Original sequences are the reference: an enhancement

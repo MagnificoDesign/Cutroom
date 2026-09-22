@@ -1,12 +1,12 @@
-import { inspectMedia } from './media.mjs?v=14';
-import { check } from './vault.mjs?v=14';
-import { planEditAsync } from './planner.mjs?v=14';
-import { refineMotion } from './motion.mjs?v=14';
-import { soundWindow, soundRanges, pauseCandidates } from './audio-cuts.mjs?v=14';
-import { coarseCandidates, refineAlignment, overlapSeams, verifySound, MIN_OVERLAP, MAX_OVERLAP } from './overlap.mjs?v=14';
+import { inspectMedia } from './media.mjs?v=15';
+import { check } from './vault.mjs?v=15';
+import { planEditAsync } from './planner.mjs?v=15';
+import { refineMotion } from './motion.mjs?v=15';
+import { soundWindow, soundRanges, pauseCandidates } from './audio-cuts.mjs?v=15';
+import { coarseCandidates, refineAlignment, overlapSeams, verifySound, MIN_OVERLAP, MAX_OVERLAP } from './overlap.mjs?v=15';
 
-import { inspectSources } from './export-inspect.mjs?v=14';
-import { sourceTimes, nearbyFrames, coarseFrames } from './cut-timing.mjs?v=14';
+import { inspectSources } from './export-inspect.mjs?v=15';
+import { sourceTimes, nearbyFrames, coarseFrames } from './cut-timing.mjs?v=15';
 
 export async function analyzeJoins({ clips, getBlob, signal, onProgress = () => {}, inspect = inspectMedia, readSources = inspectSources }) {
   const sourceInfos = await readSources(clips, getBlob, signal, onProgress);

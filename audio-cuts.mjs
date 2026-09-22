@@ -1,4 +1,4 @@
-import { cutAt } from './cut-timing.mjs?v=14';
+import { cutAt } from './cut-timing.mjs?v=15';
 
 // Acoustic pauses, not speech recognition. A low-energy instant is insufficient:
 // require quiet on both sides of an interior cut and never infer silence from

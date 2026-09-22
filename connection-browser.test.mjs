@@ -70,9 +70,9 @@ async function run(name, names, inspect) {
   try {
     await page.goto(base);
     const result = await page.evaluate(async names => {
-      const { analyzeContinuity } = await import('/continuity.mjs?v=14');
-      const { probe } = await import('/media.mjs?v=14');
-      const { renderEdit } = await import('/renderer.mjs?v=14');
+      const { analyzeContinuity } = await import('/continuity.mjs?v=15');
+      const { probe } = await import('/media.mjs?v=15');
+      const { renderEdit } = await import('/renderer.mjs?v=15');
       const blobs = new Map(), clips = [];
       for (const name of names) {
         const blob = await (await fetch('/fixtures/' + name)).blob(); blobs.set(name, blob);

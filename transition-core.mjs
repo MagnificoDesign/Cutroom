@@ -1,4 +1,4 @@
-import { trackMotion } from './motion.mjs?v=14';
+import { trackMotion } from './motion.mjs?v=15';
 
 const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] || 0;
 const clamp = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
